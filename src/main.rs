@@ -60,7 +60,7 @@ fn user_input_block_device(
             partition_name.yellow()
         ))
         .default(0)
-        .max_length(3)
+        .max_length(10)
         .items(block_devices);
     let index = if allow_skip {
         prompt.item("Skip").interact().ok()?
@@ -83,7 +83,7 @@ fn user_input_btrfs_subvolume(
             partition_name.yellow()
         ))
         .default(0)
-        .max_length(3)
+        .max_length(10)
         .items(subvolumes)
         .interact()
         .unwrap();
