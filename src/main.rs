@@ -2,35 +2,55 @@ pub mod args;
 pub mod block_device;
 
 use block_device::BlockOrSubvolumeID;
+
+use std::io;
+use std::{collections::HashMap, path::Path, process::exit};
+
 use clap::Parser;
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use log::{Level, Metadata, Record};
 use nix::unistd::Uid;
-use std::{collections::HashMap, path::Path, process::exit};
 use subprocess::Exec;
 use tempfile::TempDir;
 use which::which;
 
-fn print_info(msg: &str) {
-    println!("{} {}", "Info:".cyan(), msg);
-}
+struct SimpleLogger;
 
-fn print_warning(msg: &str) {
-    println!("{} {}", "Warning:".yellow(), msg);
-}
+static LOGGER: SimpleLogger = SimpleLogger;
 
-fn print_error(msg: &str) {
-    eprintln!("{} {}", "Error:".red(), msg);
+impl log::Log for SimpleLogger {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= Level::Info
+    }
+
+    fn log(&self, record: &Record) {
+        if self.enabled(record.metadata()) {
+            let level_str = match record.level() {
+                Level::Error => "Error:".red(),
+                Level::Warn => "Warning:".yellow(),
+                Level::Info => "Info:".cyan(),
+                Level::Debug => "Debug:".white(),
+                Level::Trace => "Trace:".black(),
+            };
+            println!("{} {}", level_str, record.args());
+        }
+    }
+
+    fn flush(&self) {
+        use std::io::Write;
+        io::stdout().flush().unwrap();
+    }
 }
 
 fn print_error_and_exit(msg: &str) {
-    print_error(msg);
+    log::error!("{msg}");
     exit(1);
 }
 
 fn user_input_block_device(
     partition_name: &str,
-    block_devices: Vec<block_device::BlockDevice>,
+    block_devices: &[block_device::BlockDevice],
     allow_skip: bool,
 ) -> Option<block_device::BlockDevice> {
     let default_theme = ColorfulTheme::default();
@@ -41,21 +61,21 @@ fn user_input_block_device(
         ))
         .default(0)
         .max_length(3)
-        .items(&block_devices);
+        .items(block_devices);
     let index = if allow_skip {
-        prompt.item("Skip").interact().unwrap()
+        prompt.item("Skip").interact().ok()?
     } else {
-        prompt.interact().unwrap()
+        prompt.interact().ok()?
     };
     if index == block_devices.len() {
         return None;
     }
-    return Some(block_devices[index].clone());
+    Some(block_devices[index].clone())
 }
 
 fn user_input_btrfs_subvolume(
     partition_name: &str,
-    subvolumes: Vec<block_device::BTRFSSubVolume>,
+    subvolumes: &[block_device::BTRFSSubVolume],
 ) -> block_device::BTRFSSubVolume {
     let index = Select::with_theme(&ColorfulTheme::default())
         .with_prompt(format!(
@@ -64,30 +84,36 @@ fn user_input_btrfs_subvolume(
         ))
         .default(0)
         .max_length(3)
-        .items(&subvolumes)
+        .items(subvolumes)
         .interact()
         .unwrap();
-    return subvolumes[index].clone();
+    subvolumes[index].clone()
+}
+
+fn basic_user_input_confirm<'a>(prompt_text: &'a str, theme: &'a ColorfulTheme) -> Confirm<'a> {
+    Confirm::with_theme(theme)
+        .with_prompt(prompt_text)
+        .default(false)
+        .show_default(false)
+        .wait_for_newline(true)
 }
 
 fn user_input_mount_additional_partitions() -> bool {
-    Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Do you want to mount additional partitions?")
-        .default(false)
-        .show_default(false)
-        .wait_for_newline(true)
-        .interact()
-        .unwrap()
+    basic_user_input_confirm(
+        "Do you want to mount additional partitions?",
+        &ColorfulTheme::default(),
+    )
+    .interact()
+    .unwrap()
 }
 
 fn user_input_continue_on_mount_failure() -> bool {
-    Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt("Do you want to skip mounting this partition?")
-        .default(false)
-        .show_default(false)
-        .wait_for_newline(true)
-        .interact()
-        .unwrap()
+    basic_user_input_confirm(
+        "Do you want to skip mounting this partition?",
+        &ColorfulTheme::default(),
+    )
+    .interact()
+    .unwrap()
 }
 
 fn user_input_mount_point() -> String {
@@ -95,7 +121,7 @@ fn user_input_mount_point() -> String {
         .with_prompt(
             "Enter the mount point for additional partition (e.g. /boot) type 'skip' to cancel: ",
         )
-        .validate_with(|input: &String| -> Result<(), &str> {
+        .validate_with(|input: &String| -> Result<(), &'static str> {
             if input.starts_with('/') || input.eq_ignore_ascii_case("skip") {
                 Ok(())
             } else {
@@ -112,11 +138,13 @@ fn mount_block_device(
     gracefully_fail: bool,
     options: Option<Vec<String>>,
 ) {
-    let options = options.unwrap_or_else(Vec::new);
-    print_info(&format!(
+    let options = options.unwrap_or_default();
+    log::info!(
         "Mounting partition {} at {} with options: {:?}",
-        device.name, mount_point, options
-    ));
+        device.name,
+        mount_point,
+        options
+    );
     let result = Exec::cmd("mount")
         .arg(&device.name)
         .arg(mount_point)
@@ -124,10 +152,11 @@ fn mount_block_device(
         .join();
     if result.is_err() {
         if gracefully_fail && user_input_continue_on_mount_failure() {
-            print_warning(&format!(
+            log::warn!(
                 "Failed to mount partition {} at {}, skipping...",
-                device.name, mount_point
-            ));
+                device.name,
+                mount_point
+            );
         } else {
             print_error_and_exit(&format!(
                 "Failed to mount partition {} at {}",
@@ -143,7 +172,7 @@ fn umount_block_device(mount_point: &str, recursive: bool) {
     } else {
         vec![mount_point]
     };
-    print_info(&format!("Unmounting partition at {}", mount_point));
+    log::info!("Unmounting partition at {}", mount_point);
     Exec::cmd("umount")
         .args(&args)
         .join()
@@ -166,16 +195,15 @@ fn list_subvolumes(
         .capture()
         .expect("Failed to list BTRFS subvolumes")
         .stdout_str();
-    let subvolume_lines: Vec<&str> = subvolumes_raw.trim().split("\n").collect();
-    let mut subvolumes: Vec<block_device::BTRFSSubVolume> =
-        vec![block_device::BTRFSSubVolume::new(
-            device.clone(),
-            5,
-            "/".to_string(),
-        )];
+    let subvolume_lines = subvolumes_raw.trim().split('\n').collect::<Vec<_>>();
+    let mut subvolumes = vec![block_device::BTRFSSubVolume {
+        device: device.clone(),
+        subvolume_id: 5,
+        subvolume_name: "/".to_owned(),
+    }];
 
     for subvolume in &subvolume_lines[2..] {
-        let subvolume_parts: Vec<&str> = subvolume.split_whitespace().collect();
+        let subvolume_parts = subvolume.split_whitespace().collect::<Vec<_>>();
 
         if subvolume_parts.len() == 4 {
             let subvolume_id = subvolume_parts[0];
@@ -193,11 +221,13 @@ fn list_subvolumes(
 
     umount_block_device(mount_point, false);
 
-    return subvolumes;
+    subvolumes
 }
 
 fn main() {
     let args = args::Args::parse();
+
+    init_logger().expect("Failed to initialize logger");
 
     if !Uid::effective().is_root() && !args.skip_root_check {
         print_error_and_exit(
@@ -239,7 +269,7 @@ fn main() {
     let disks: block_device::BlockDevices =
         serde_json::from_str(&disks_raw).expect("Failed to parse lsblk output");
     let size = disks.block_devices.len();
-    print_info(&format!("Found {} block devices", size));
+    log::info!("Found {} block devices", size);
 
     if size == 0 {
         print_error_and_exit("No block devices found on the system");
@@ -248,10 +278,10 @@ fn main() {
     let mut mounted_partitions: Vec<String> = Vec::new();
 
     for disk in &disks.block_devices {
-        print_info(&format!("Found partition: {}", disk.to_string()));
+        log::info!("Found partition: {}", disk.to_string());
     }
 
-    let selected_device = user_input_block_device("root", disks.block_devices.clone(), false)
+    let selected_device = user_input_block_device("root", &disks.block_devices, false)
         .expect("No block device selected for root partition");
     let mut discovered_btrfs_subvolumes: HashMap<String, Vec<block_device::BTRFSSubVolume>> =
         HashMap::new();
@@ -259,19 +289,19 @@ fn main() {
 
     if selected_device.fs_type == "btrfs" {
         root_mount_options.push(String::from("-o"));
-        print_info("Selected BTRFS partition, mounting and listing subvolumes...");
+        log::info!("Selected BTRFS partition, mounting and listing subvolumes...");
 
         let subvolumes = list_subvolumes(&selected_device, args.show_btrfs_dot_snapshots);
         discovered_btrfs_subvolumes.insert(selected_device.name.clone(), subvolumes.clone());
 
         for subvolume in &subvolumes {
-            print_info(&format!("Found subvolume: {}", subvolume.subvolume_name));
+            log::info!("Found subvolume: {}", subvolume.subvolume_name);
         }
         let selected_subvolume = if subvolumes.len() == 1 {
-            print_warning("No subvolumes found, using root subvolume");
+            log::warn!("No subvolumes found, using root subvolume");
             subvolumes[0].clone()
         } else {
-            user_input_btrfs_subvolume("root", subvolumes)
+            user_input_btrfs_subvolume("root", &subvolumes)
         };
         mounted_partitions.push(selected_subvolume.get_id());
         root_mount_options.push(format!("subvolid={}", selected_subvolume.subvolume_id));
@@ -297,13 +327,13 @@ fn main() {
     let ideal_fstab_path = Path::new(root_mount_point).join("etc").join("fstab");
 
     if !ideal_fstab_path.exists() {
-        print_warning(
+        log::warn!(
             "Unable to find /etc/fstab in the root partition, is this a valid root partition? Good luck fixing that!",
         );
     }
 
     if !args.no_auto_mount {
-        print_info("Auto-mounting block devices based on /etc/fstab...");
+        log::info!("Auto-mounting block devices based on /etc/fstab...");
         // TODO: Implement auto-mounting based on /etc/fstab
     }
 
@@ -313,18 +343,17 @@ fn main() {
             if mount_point.eq_ignore_ascii_case("skip") {
                 break;
             }
-            let selected_device =
-                user_input_block_device(&mount_point, disks.block_devices.clone(), true);
+            let selected_device = user_input_block_device(&mount_point, &disks.block_devices, true);
             if selected_device.is_none() {
                 continue;
             }
             let selected_device = selected_device.unwrap();
             if mounted_partitions.contains(&selected_device.get_id()) {
-                print_warning("Partition already mounted, skipping...");
+                log::warn!("Partition already mounted, skipping...");
                 continue;
             }
             if selected_device.fs_type == "btrfs" {
-                let mut mount_options = vec![String::from("-o")];
+                let mut mount_options = vec!["-o".to_owned()];
                 let subvolumes = if discovered_btrfs_subvolumes.contains_key(&selected_device.name)
                 {
                     discovered_btrfs_subvolumes
@@ -335,13 +364,13 @@ fn main() {
                     list_subvolumes(&selected_device, args.show_btrfs_dot_snapshots)
                 };
                 let selected_subvolume = if subvolumes.len() == 1 {
-                    print_warning("No subvolumes found, using root subvolume");
+                    log::warn!("No subvolumes found, using root subvolume");
                     subvolumes[0].clone()
                 } else {
-                    user_input_btrfs_subvolume(&mount_point, subvolumes.clone())
+                    user_input_btrfs_subvolume(&mount_point, &subvolumes)
                 };
                 if mounted_partitions.contains(&selected_subvolume.get_id()) {
-                    print_warning("Partition already mounted, skipping...");
+                    log::warn!("Partition already mounted, skipping...");
                     continue;
                 }
                 mount_options.push(format!("subvolid={}", selected_subvolume.subvolume_id));
@@ -359,8 +388,8 @@ fn main() {
         }
     }
 
-    print_info("Chrooting into the configured root partition...");
-    print_info("To exit the chroot, type 'exit' or press Ctrl+D");
+    log::info!("Chrooting into the configured root partition...");
+    log::info!("To exit the chroot, type 'exit' or press Ctrl+D");
 
     Exec::cmd("arch-chroot")
         .arg(root_mount_point)
@@ -368,4 +397,8 @@ fn main() {
         .expect("Failed to chroot into root partition");
 
     umount_block_device(root_mount_point, true);
+}
+
+pub fn init_logger() -> Result<(), log::SetLoggerError> {
+    log::set_logger(&LOGGER).map(|()| log::set_max_level(log::LevelFilter::Info))
 }
