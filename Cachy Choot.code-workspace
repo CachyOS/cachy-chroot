@@ -1,0 +1,25 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"cSpell.words": [
+			"blockdevices",
+			"BTRFS",
+			"cachyos",
+			"Chrooting",
+			"dialoguer",
+			"fstype",
+			"pacman",
+			"partlabel",
+			"partuuid",
+			"subvolid",
+			"subvolume",
+			"subvolumes",
+			"tempfile",
+			"unistd"
+		]
+	}
+}

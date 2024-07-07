@@ -1,0 +1,24 @@
+[package]
+name = "cachy-chroot"
+version = "1.0.0"
+authors = ["SoulHarsh007 <harsh.peshwani@outlook.com>"]
+license = "BSD-3-Clause"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.8", features = ["derive"] }
+colored = "2.1.0"
+dialoguer = "0.11.0"
+fstab = "0.4.0"
+nix = { version = "0.29.0", features = ["user"] }
+serde = { version = "1.0.204", features = ["derive"] }
+serde_json = "1.0.120"
+subprocess = "0.2.9"
+tempfile = "3.10.1"
+which = "6.0.1"
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = 3
+codegen-units = 1
