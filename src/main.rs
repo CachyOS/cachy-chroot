@@ -150,7 +150,7 @@ fn mount_block_device(
         .arg(mount_point)
         .args(&options)
         .join();
-    if result.is_err() {
+    if result.is_err() || !result.unwrap().success() {
         if gracefully_fail && user_input_continue_on_mount_failure() {
             log::warn!(
                 "Failed to mount partition {} at {}, skipping...",
@@ -333,59 +333,58 @@ fn main() {
     }
 
     if !args.no_auto_mount {
-        log::info!("Auto-mounting block devices based on /etc/fstab...");
         // TODO: Implement auto-mounting based on /etc/fstab
     }
 
-    if user_input_mount_additional_partitions() {
-        loop {
-            let mount_point = user_input_mount_point();
-            if mount_point.eq_ignore_ascii_case("skip") {
-                break;
-            }
-            let selected_device = user_input_block_device(&mount_point, &disks.block_devices, true);
-            if selected_device.is_none() {
-                continue;
-            }
-            let selected_device = selected_device.unwrap();
-            if mounted_partitions.contains(&selected_device.get_id()) {
+    while user_input_mount_additional_partitions() {
+        let mount_point = user_input_mount_point();
+        if mount_point.eq_ignore_ascii_case("skip") {
+            break;
+        }
+        let actual_mount_point =
+            Path::new(root_mount_point).join(mount_point.trim_start_matches('/'));
+        let actual_mount_point = actual_mount_point.to_str().unwrap();
+        let selected_device = user_input_block_device(&mount_point, &disks.block_devices, true);
+        if selected_device.is_none() {
+            continue;
+        }
+        let selected_device = selected_device.unwrap();
+        if mounted_partitions.contains(&selected_device.get_id()) {
+            log::warn!("Partition already mounted, skipping...");
+            continue;
+        }
+        if selected_device.fs_type == "btrfs" {
+            let mut mount_options = vec!["-o".to_owned()];
+            let subvolumes = if discovered_btrfs_subvolumes.contains_key(&selected_device.name) {
+                discovered_btrfs_subvolumes
+                    .get(&selected_device.name)
+                    .unwrap()
+                    .clone()
+            } else {
+                list_subvolumes(&selected_device, args.show_btrfs_dot_snapshots)
+            };
+            let selected_subvolume = if subvolumes.len() == 1 {
+                log::warn!("No subvolumes found, using root subvolume");
+                subvolumes[0].clone()
+            } else {
+                user_input_btrfs_subvolume(&mount_point, &subvolumes)
+            };
+            if mounted_partitions.contains(&selected_subvolume.get_id()) {
                 log::warn!("Partition already mounted, skipping...");
                 continue;
             }
-            if selected_device.fs_type == "btrfs" {
-                let mut mount_options = vec!["-o".to_owned()];
-                let subvolumes = if discovered_btrfs_subvolumes.contains_key(&selected_device.name)
-                {
-                    discovered_btrfs_subvolumes
-                        .get(&selected_device.name)
-                        .unwrap()
-                        .clone()
-                } else {
-                    list_subvolumes(&selected_device, args.show_btrfs_dot_snapshots)
-                };
-                let selected_subvolume = if subvolumes.len() == 1 {
-                    log::warn!("No subvolumes found, using root subvolume");
-                    subvolumes[0].clone()
-                } else {
-                    user_input_btrfs_subvolume(&mount_point, &subvolumes)
-                };
-                if mounted_partitions.contains(&selected_subvolume.get_id()) {
-                    log::warn!("Partition already mounted, skipping...");
-                    continue;
-                }
-                mount_options.push(format!("subvolid={}", selected_subvolume.subvolume_id));
-                mount_block_device(
-                    &selected_subvolume.device,
-                    &mount_point,
-                    false,
-                    Some(mount_options),
-                );
-                mounted_partitions.push(selected_subvolume.get_id());
-                continue;
-            }
-            mount_block_device(&selected_device, &mount_point, false, None);
-            mounted_partitions.push(selected_device.get_id());
+            mount_options.push(format!("subvolid={}", selected_subvolume.subvolume_id));
+            mount_block_device(
+                &selected_subvolume.device,
+                actual_mount_point,
+                true,
+                Some(mount_options),
+            );
+            mounted_partitions.push(selected_subvolume.get_id());
+            continue;
         }
+        mount_block_device(&selected_device, actual_mount_point, true, None);
+        mounted_partitions.push(selected_device.get_id());
     }
 
     log::info!("Chrooting into the configured root partition...");
