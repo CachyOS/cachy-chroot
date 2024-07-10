@@ -117,6 +117,15 @@ fn user_input_continue_on_mount_failure() -> bool {
     .unwrap()
 }
 
+fn user_input_use_cachyos_btrfs_preset() -> bool {
+    basic_user_input_confirm(
+        "Do you want to use CachyOS BTRFS preset to auto mount root subvolume?",
+        &ColorfulTheme::default(),
+    )
+    .interact()
+    .unwrap()
+}
+
 fn user_input_mount_point() -> String {
     Input::with_theme(&ColorfulTheme::default())
         .with_prompt(
@@ -304,7 +313,14 @@ fn main() {
             log::warn!("No subvolumes found, using root subvolume");
             subvolumes[0].clone()
         } else {
-            user_input_btrfs_subvolume("root", &subvolumes)
+            let cachy_default_root_subvol = subvolumes
+                .iter()
+                .find(|subvol| subvol.subvolume_name == "@");
+            if cachy_default_root_subvol.is_some() && user_input_use_cachyos_btrfs_preset() {
+                cachy_default_root_subvol.unwrap().clone()
+            } else {
+                user_input_btrfs_subvolume("root", &subvolumes)
+            }
         };
         mounted_partitions.push(selected_subvolume.get_id());
         root_mount_options.push(format!("subvolid={}", selected_subvolume.subvolume_id));
