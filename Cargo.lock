@@ -62,6 +62,7 @@ name = "cachy-chroot"
 version = "1.1.1"
 dependencies = [
  "clap",
+ "clap_complete",
  "colored",
  "dialoguer",
  "fstab",
@@ -106,6 +107,15 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+]
+
+[[package]]
+name = "clap_complete"
+version = "4.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b4be9c4c4b1f30b78d8a750e0822b6a6102d97e62061c583a6c1dea2dfb33ae"
+dependencies = [
+ "clap",
 ]
 
 [[package]]
