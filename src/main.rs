@@ -1,48 +1,19 @@
 pub mod args;
 pub mod block_device;
+pub mod logger;
 pub mod user_input;
 
 use block_device::BlockOrSubvolumeID;
 
-use std::io;
 use std::{collections::HashMap, path::Path, process::exit};
 
 use clap::Parser;
 use colored::Colorize;
 use fstab::FsTab;
-use log::{Level, Metadata, Record};
 use nix::unistd::Uid;
 use subprocess::Exec;
 use tempfile::TempDir;
 use which::which;
-
-struct SimpleLogger;
-
-static LOGGER: SimpleLogger = SimpleLogger;
-
-impl log::Log for SimpleLogger {
-    fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Info
-    }
-
-    fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
-            let level_str = match record.level() {
-                Level::Error => "Error:".red(),
-                Level::Warn => "Warning:".yellow(),
-                Level::Info => "Info:".cyan(),
-                Level::Debug => "Debug:".white(),
-                Level::Trace => "Trace:".black(),
-            };
-            println!("{} {}", level_str, record.args());
-        }
-    }
-
-    fn flush(&self) {
-        use std::io::Write;
-        io::stdout().flush().unwrap();
-    }
-}
 
 fn print_error_and_exit(msg: &str) {
     log::error!("{msg}");
@@ -146,7 +117,7 @@ fn list_subvolumes(
 fn main() {
     let args = args::Args::parse();
 
-    init_logger().expect("Failed to initialize logger");
+    logger::init_logger().expect("Failed to initialize logger");
 
     if !Uid::effective().is_root() && !args.skip_root_check {
         print_error_and_exit(
@@ -440,8 +411,4 @@ fn main() {
         .expect("Failed to chroot into root partition");
 
     umount_block_device(root_mount_point, true);
-}
-
-pub fn init_logger() -> Result<(), log::SetLoggerError> {
-    log::set_logger(&LOGGER).map(|()| log::set_max_level(log::LevelFilter::Info))
 }
