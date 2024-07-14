@@ -1,5 +1,6 @@
 pub mod args;
 pub mod block_device;
+pub mod user_input;
 
 use block_device::BlockOrSubvolumeID;
 
@@ -8,7 +9,6 @@ use std::{collections::HashMap, path::Path, process::exit};
 
 use clap::Parser;
 use colored::Colorize;
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use fstab::FsTab;
 use log::{Level, Metadata, Record};
 use nix::unistd::Uid;
@@ -49,99 +49,6 @@ fn print_error_and_exit(msg: &str) {
     exit(1);
 }
 
-fn user_input_block_device(
-    partition_name: &str,
-    block_devices: &[block_device::BlockDevice],
-    allow_skip: bool,
-) -> Option<block_device::BlockDevice> {
-    let default_theme = ColorfulTheme::default();
-    let prompt = Select::with_theme(&default_theme)
-        .with_prompt(format!(
-            "Select the block device for the {} partition (use arrow keys): ",
-            partition_name.yellow()
-        ))
-        .default(0)
-        .max_length(10)
-        .items(block_devices);
-    let index = if allow_skip {
-        prompt.item("Skip").interact().ok()?
-    } else {
-        prompt.interact().ok()?
-    };
-    if index == block_devices.len() {
-        return None;
-    }
-    Some(block_devices[index].clone())
-}
-
-fn user_input_btrfs_subvolume(
-    partition_name: &str,
-    subvolumes: &[block_device::BTRFSSubVolume],
-) -> block_device::BTRFSSubVolume {
-    let index = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!(
-            "Select the subvolume for the {} partition (use arrow keys): ",
-            partition_name.yellow()
-        ))
-        .default(0)
-        .max_length(10)
-        .items(subvolumes)
-        .interact()
-        .unwrap();
-    subvolumes[index].clone()
-}
-
-fn basic_user_input_confirm<'a>(prompt_text: &'a str, theme: &'a ColorfulTheme) -> Confirm<'a> {
-    Confirm::with_theme(theme)
-        .with_prompt(prompt_text)
-        .default(false)
-        .show_default(false)
-        .wait_for_newline(true)
-}
-
-fn user_input_mount_additional_partitions() -> bool {
-    basic_user_input_confirm(
-        "Do you want to mount additional partitions?",
-        &ColorfulTheme::default(),
-    )
-    .interact()
-    .unwrap()
-}
-
-fn user_input_continue_on_mount_failure() -> bool {
-    basic_user_input_confirm(
-        "Do you want to skip mounting this partition?",
-        &ColorfulTheme::default(),
-    )
-    .interact()
-    .unwrap()
-}
-
-fn user_input_use_cachyos_btrfs_preset() -> bool {
-    basic_user_input_confirm(
-        "Do you want to use CachyOS BTRFS preset to auto mount root subvolume?",
-        &ColorfulTheme::default(),
-    )
-    .interact()
-    .unwrap()
-}
-
-fn user_input_mount_point() -> String {
-    Input::with_theme(&ColorfulTheme::default())
-        .with_prompt(
-            "Enter the mount point for additional partition (e.g. /boot) type 'skip' to cancel: ",
-        )
-        .validate_with(|input: &String| -> Result<(), &'static str> {
-            if input.starts_with('/') || input.eq_ignore_ascii_case("skip") {
-                Ok(())
-            } else {
-                Err("Mount point must start with /")
-            }
-        })
-        .interact()
-        .unwrap()
-}
-
 fn mount_block_device(
     device: &block_device::BlockDevice,
     mount_point: &str,
@@ -161,7 +68,7 @@ fn mount_block_device(
         .args(&options)
         .join();
     if result.is_err() || !result.unwrap().success() {
-        if gracefully_fail && user_input_continue_on_mount_failure() {
+        if gracefully_fail && user_input::continue_on_mount_failure() {
             log::warn!(
                 "Failed to mount partition {} at {}, skipping...",
                 device.name,
@@ -293,7 +200,7 @@ fn main() {
         log::info!("Found partition: {}", disk.to_string());
     }
 
-    let selected_device = user_input_block_device("root", &disks.block_devices, false)
+    let selected_device = user_input::get_block_device("root", &disks.block_devices, false)
         .expect("No block device selected for root partition");
     let mut discovered_btrfs_subvolumes: HashMap<String, Vec<block_device::BTRFSSubVolume>> =
         HashMap::new();
@@ -316,10 +223,10 @@ fn main() {
             let cachy_default_root_subvol = subvolumes
                 .iter()
                 .find(|subvol| subvol.subvolume_name == "@");
-            if cachy_default_root_subvol.is_some() && user_input_use_cachyos_btrfs_preset() {
+            if cachy_default_root_subvol.is_some() && user_input::use_cachyos_btrfs_preset() {
                 cachy_default_root_subvol.unwrap().clone()
             } else {
-                user_input_btrfs_subvolume("root", &subvolumes)
+                user_input::get_btrfs_subvolume("root", &subvolumes)
             }
         };
         mounted_partitions.push(selected_subvolume.get_id());
@@ -469,15 +376,16 @@ fn main() {
         log::info!("Finished mounting additional partitions");
     }
 
-    while user_input_mount_additional_partitions() {
-        let mount_point = user_input_mount_point();
+    while user_input::mount_additional_partitions() {
+        let mount_point = user_input::get_mount_point();
         if mount_point.eq_ignore_ascii_case("skip") {
             break;
         }
         let actual_mount_point =
             Path::new(root_mount_point).join(mount_point.trim_start_matches('/'));
         let actual_mount_point = actual_mount_point.to_str().unwrap();
-        let selected_device = user_input_block_device(&mount_point, &disks.block_devices, true);
+        let selected_device =
+            user_input::get_block_device(&mount_point, &disks.block_devices, true);
         if selected_device.is_none() {
             continue;
         }
@@ -499,7 +407,7 @@ fn main() {
                 log::warn!("No subvolumes found, using root subvolume");
                 subvolumes[0].clone()
             } else {
-                user_input_btrfs_subvolume(&mount_point, &subvolumes)
+                user_input::get_btrfs_subvolume(&mount_point, &subvolumes)
             };
             if mounted_partitions.contains(&selected_subvolume.get_id()) {
                 log::warn!("Partition already mounted, skipping...");
