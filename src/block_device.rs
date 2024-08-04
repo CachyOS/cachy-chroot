@@ -4,7 +4,7 @@ pub trait BlockOrSubvolumeID {
     fn get_id(&self) -> String;
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct BlockDevice {
     pub name: String,
     #[serde(rename = "fstype")]

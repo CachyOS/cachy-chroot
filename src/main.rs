@@ -3,9 +3,14 @@ pub mod block_device;
 pub mod logger;
 pub mod user_input;
 
-use block_device::BlockOrSubvolumeID;
+use block_device::{BlockDevice, BlockOrSubvolumeID};
 
-use std::{collections::HashMap, path::Path, process::exit};
+use std::{
+    collections::HashMap,
+    fs::read_to_string,
+    path::{Path, PathBuf},
+    process::exit,
+};
 
 use clap::Parser;
 use colored::Colorize;
@@ -18,6 +23,31 @@ use which::which;
 fn print_error_and_exit(msg: &str) {
     log::error!("{msg}");
     exit(1);
+}
+
+fn crypto_open_luks_device(device: &block_device::BlockDevice) -> bool {
+    log::info!("Opening LUKS encrypted partition {}", device.name);
+    let result = Exec::cmd("cryptsetup")
+        .args(&["luksOpen", &device.name, &format!("luks-{}", &device.uuid)])
+        .join();
+    if result.is_err() || !result.unwrap().success() {
+        print_error_and_exit(&format!(
+            "Failed to open LUKS encrypted partition {}",
+            device.name
+        ));
+    }
+    true
+}
+
+fn crypto_close_luks_device(device: &block_device::BlockDevice) -> bool {
+    log::info!("Closing LUKS encrypted partition {}", device.name);
+    let result = Exec::cmd("cryptsetup")
+        .args(&["luksClose", &format!("luks-{}", &device.uuid)])
+        .join();
+    if result.is_err() || !result.unwrap().success() {
+        log::warn!("Failed to close LUKS encrypted partition {}", device.name);
+    }
+    true
 }
 
 fn mount_block_device(
@@ -148,6 +178,75 @@ fn get_btrfs_subvolume(
     selected_subvolume
 }
 
+fn list_block_devices(ignored_devices: Option<Vec<BlockDevice>>) -> Vec<block_device::BlockDevice> {
+    let disks_raw = Exec::cmd("lsblk")
+        .args(&[
+            "-f",
+            "-o",
+            "NAME,FSTYPE,UUID,PARTUUID,LABEL,PARTLABEL",
+            "-p",
+            "-a",
+            "-J",
+            "-Q",
+            "type=='part' || type=='crypt' && fstype!='swap' && fstype",
+        ])
+        .capture()
+        .expect("Failed to run lsblk")
+        .stdout_str();
+
+    let disks: block_device::BlockDevices =
+        serde_json::from_str(&disks_raw).expect("Failed to parse lsblk output");
+
+    let ignored_devices = ignored_devices.unwrap_or_default();
+    let block_devices = disks.block_devices;
+
+    if ignored_devices.is_empty() {
+        return block_devices;
+    }
+
+    block_devices
+        .into_iter()
+        .filter(|d| !ignored_devices.contains(d))
+        .collect()
+}
+
+fn list_crypttab_entries(
+    crypttab_path: &PathBuf,
+    has_luks_on_root: bool,
+) -> HashMap<String, String> {
+    let mut crypttab_entries: HashMap<String, String> = HashMap::new();
+
+    if !crypttab_path.exists() {
+        if has_luks_on_root {
+            log::warn!(
+            "Unable to find /etc/crypttab in the root partition, is this a valid root partition? Good luck fixing that!",
+        );
+        }
+    } else {
+        let contents = read_to_string(crypttab_path);
+
+        if contents.is_err() {
+            log::error!("Failed to read /etc/crypttab, skipping...");
+            return crypttab_entries;
+        }
+
+        for line in contents.unwrap().lines() {
+            if line.starts_with('#') {
+                continue;
+            }
+            let parts = line.split_whitespace().collect::<Vec<_>>();
+            if parts.len() < 2 {
+                log::warn!("Invalid crypttab entry, skipping...");
+                continue;
+            }
+            let device = parts[1].trim_start_matches("UUID=");
+            crypttab_entries.insert(parts[0].to_string(), device.to_string());
+        }
+    }
+
+    crypttab_entries
+}
+
 fn main() {
     let args = args::Args::parse();
 
@@ -165,6 +264,7 @@ fn main() {
         ("umount", "util-linux"),
         ("arch-chroot", "arch-install-scripts"),
         ("btrfs", "btrfs-progs"),
+        ("cryptsetup", "cryptsetup"),
     ];
 
     for (cmd, pkg) in &depends {
@@ -176,23 +276,8 @@ fn main() {
         }
     }
 
-    let disks_raw = Exec::cmd("lsblk")
-        .args(&[
-            "-f",
-            "-o",
-            "NAME,FSTYPE,UUID,PARTUUID,LABEL,PARTLABEL",
-            "-p",
-            "-a",
-            "-J",
-            "-Q",
-            "type=='part' && fstype!='swap' && fstype",
-        ])
-        .capture()
-        .expect("Failed to run lsblk")
-        .stdout_str();
-    let disks: block_device::BlockDevices =
-        serde_json::from_str(&disks_raw).expect("Failed to parse lsblk output");
-    let size = disks.block_devices.len();
+    let mut block_devices = list_block_devices(None);
+    let size = block_devices.len();
     log::info!("Found {} block devices", size);
 
     if size == 0 {
@@ -201,15 +286,26 @@ fn main() {
 
     let mut mounted_partitions: Vec<String> = Vec::new();
 
-    for disk in &disks.block_devices {
+    for disk in &block_devices {
         log::info!("Found partition: {}", disk.to_string());
     }
 
-    let selected_device = user_input::get_block_device("root", &disks.block_devices, false)
+    let mut selected_device = user_input::get_block_device("root", &block_devices, false)
         .expect("No block device selected for root partition");
     let mut discovered_btrfs_subvolumes: HashMap<String, Vec<block_device::BTRFSSubVolume>> =
         HashMap::new();
     let mut root_mount_options: Vec<String> = Vec::new();
+    let mut opened_luks_devices: Vec<BlockDevice> = Vec::new();
+    let mut has_luks_on_root = false;
+
+    if selected_device.fs_type == "crypto_LUKS" {
+        has_luks_on_root = true;
+        crypto_open_luks_device(&selected_device);
+        opened_luks_devices.push(selected_device.clone());
+        block_devices = list_block_devices(Some(opened_luks_devices.to_owned()));
+        selected_device = user_input::get_block_device("root", &block_devices, false)
+            .expect("No block device selected for root partition");
+    }
 
     if selected_device.fs_type == "btrfs" {
         root_mount_options.push("-o".to_owned());
@@ -243,6 +339,9 @@ fn main() {
     );
 
     let ideal_fstab_path = Path::new(root_mount_point).join("etc").join("fstab");
+    let ideal_crypttab_path = Path::new(root_mount_point).join("etc").join("crypttab");
+
+    let crypttab_entries = list_crypttab_entries(&ideal_crypttab_path, has_luks_on_root);
 
     if !ideal_fstab_path.exists() {
         log::warn!(
@@ -258,7 +357,12 @@ fn main() {
                 continue;
             }
             let device = if entry.fs_spec.starts_with("/dev") {
-                disks.block_devices.iter().find(|d| d.name == entry.fs_spec)
+                let crypttab_entry = crypttab_entries.get(&entry.fs_spec);
+                block_devices.iter().find(|d| {
+                    crypttab_entry == Some(&d.name)
+                        || crypttab_entry == Some(&d.uuid)
+                        || d.name == entry.fs_spec
+                })
             } else {
                 let fs_spec = entry.fs_spec.split('=').collect::<Vec<_>>();
                 if fs_spec.len() != 2 {
@@ -266,8 +370,8 @@ fn main() {
                     continue;
                 }
                 let fs_spec = fs_spec.last().unwrap();
-                disks.block_devices.iter().find(|d| {
-                    d.uuid == fs_spec.to_string()
+                block_devices.iter().find(|d| {
+                    d.uuid == *fs_spec
                         || d.partuuid == Some(fs_spec.to_string())
                         || d.label == Some(fs_spec.to_string())
                         || d.partlabel == Some(fs_spec.to_string())
@@ -325,7 +429,8 @@ fn main() {
                 } else if let Some(subvolume_name) = fstab_opt_subvolume {
                     known_subvolumes.iter().find(|subvol| {
                         subvol.subvolume_name == subvolume_name
-                            || subvolume_name.strip_prefix('/').unwrap_or_default() == subvol.subvolume_name
+                            || subvolume_name.strip_prefix('/').unwrap_or_default()
+                                == subvol.subvolume_name
                     })
                 } else {
                     log::warn!("No subvolume specified in fstab, using root subvolume");
@@ -376,12 +481,21 @@ fn main() {
         let actual_mount_point =
             Path::new(root_mount_point).join(mount_point.trim_start_matches('/'));
         let actual_mount_point = actual_mount_point.to_str().unwrap();
-        let selected_device =
-            user_input::get_block_device(&mount_point, &disks.block_devices, true);
+        let selected_device = user_input::get_block_device(&mount_point, &block_devices, true);
         if selected_device.is_none() {
             continue;
         }
-        let selected_device = selected_device.unwrap();
+        let mut selected_device = selected_device.unwrap();
+        if selected_device.fs_type == "crypto_LUKS" {
+            crypto_open_luks_device(&selected_device);
+            opened_luks_devices.push(selected_device.clone());
+            block_devices = list_block_devices(Some(opened_luks_devices.to_owned()));
+            let user_selection = user_input::get_block_device(&mount_point, &block_devices, true);
+            if user_selection.is_none() {
+                continue;
+            }
+            selected_device = user_selection.unwrap();
+        }
         if mounted_partitions.contains(&selected_device.get_id()) {
             log::warn!("Partition already mounted, skipping...");
             continue;
@@ -424,4 +538,7 @@ fn main() {
         .expect("Failed to chroot into root partition");
 
     umount_block_device(root_mount_point, true);
+    for device in opened_luks_devices {
+        crypto_close_luks_device(&device);
+    }
 }

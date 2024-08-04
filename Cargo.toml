@@ -1,6 +1,6 @@
 [package]
 name = "cachy-chroot"
-version = "1.1.1"
+version = "1.2.0"
 authors = ["SoulHarsh007 <harsh.peshwani@outlook.com>"]
 license = "BSD-3-Clause"
 edition = "2021"
