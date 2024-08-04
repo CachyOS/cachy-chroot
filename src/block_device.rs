@@ -10,7 +10,7 @@ pub struct BlockDevice {
     #[serde(rename = "fstype")]
     pub fs_type: String,
     pub uuid: String,
-    pub partuuid: String,
+    pub partuuid: Option<String>,
     pub label: Option<String>,
     pub partlabel: Option<String>,
 }

@@ -114,6 +114,40 @@ fn list_subvolumes(
     subvolumes
 }
 
+fn get_btrfs_subvolume(
+    device: &block_device::BlockDevice,
+    discovered_btrfs_subvolumes: &mut HashMap<String, Vec<block_device::BTRFSSubVolume>>,
+    show_btrfs_dot_snapshots: bool,
+    device_name: &str,
+) -> block_device::BTRFSSubVolume {
+    let known_subvolumes = if discovered_btrfs_subvolumes.contains_key(&device.uuid) {
+        discovered_btrfs_subvolumes
+            .get(&device.uuid)
+            .unwrap()
+            .clone()
+    } else {
+        let subvolumes = list_subvolumes(device, show_btrfs_dot_snapshots);
+        discovered_btrfs_subvolumes.insert(device.uuid.clone(), subvolumes.clone());
+        subvolumes
+    };
+    let selected_subvolume = if known_subvolumes.len() == 1 {
+        log::warn!("No subvolumes found, using root subvolume");
+        known_subvolumes[0].clone()
+    } else if device_name == "root" {
+        let cachy_default_root_subvol = known_subvolumes
+            .iter()
+            .find(|subvol| subvol.subvolume_name == "@");
+        if cachy_default_root_subvol.is_some() && user_input::use_cachyos_btrfs_preset() {
+            cachy_default_root_subvol.unwrap().clone()
+        } else {
+            user_input::get_btrfs_subvolume(device_name, &known_subvolumes)
+        }
+    } else {
+        user_input::get_btrfs_subvolume(device_name, &known_subvolumes)
+    };
+    selected_subvolume
+}
+
 fn main() {
     let args = args::Args::parse();
 
@@ -151,7 +185,7 @@ fn main() {
             "-a",
             "-J",
             "-Q",
-            "type=='part' && fstype!='swap'",
+            "type=='part' && fstype!='swap' && fstype",
         ])
         .capture()
         .expect("Failed to run lsblk")
@@ -181,25 +215,12 @@ fn main() {
         root_mount_options.push("-o".to_owned());
         log::info!("Selected BTRFS partition, mounting and listing subvolumes...");
 
-        let subvolumes = list_subvolumes(&selected_device, args.show_btrfs_dot_snapshots);
-        discovered_btrfs_subvolumes.insert(selected_device.name.clone(), subvolumes.clone());
-
-        for subvolume in &subvolumes {
-            log::info!("Found subvolume: {}", subvolume.subvolume_name);
-        }
-        let selected_subvolume = if subvolumes.len() == 1 {
-            log::warn!("No subvolumes found, using root subvolume");
-            subvolumes[0].clone()
-        } else {
-            let cachy_default_root_subvol = subvolumes
-                .iter()
-                .find(|subvol| subvol.subvolume_name == "@");
-            if cachy_default_root_subvol.is_some() && user_input::use_cachyos_btrfs_preset() {
-                cachy_default_root_subvol.unwrap().clone()
-            } else {
-                user_input::get_btrfs_subvolume("root", &subvolumes)
-            }
-        };
+        let selected_subvolume = get_btrfs_subvolume(
+            &selected_device,
+            &mut discovered_btrfs_subvolumes,
+            args.show_btrfs_dot_snapshots,
+            "root",
+        );
         mounted_partitions.push(selected_subvolume.get_id());
         root_mount_options.push(format!("subvolid={}", selected_subvolume.subvolume_id));
     } else {
@@ -246,8 +267,8 @@ fn main() {
                 }
                 let fs_spec = fs_spec.last().unwrap();
                 disks.block_devices.iter().find(|d| {
-                    d.uuid == *fs_spec
-                        || d.partuuid == *fs_spec
+                    d.uuid == fs_spec.to_string()
+                        || d.partuuid == Some(fs_spec.to_string())
                         || d.label == Some(fs_spec.to_string())
                         || d.partlabel == Some(fs_spec.to_string())
                 })
@@ -271,14 +292,14 @@ fn main() {
                 .join(entry.mountpoint.to_str().unwrap().trim_start_matches('/'));
             let actual_mount_point = actual_mount_point.to_str().unwrap();
             if device.fs_type == "btrfs" {
-                let known_subvolumes = if discovered_btrfs_subvolumes.contains_key(&device.name) {
+                let known_subvolumes = if discovered_btrfs_subvolumes.contains_key(&device.uuid) {
                     discovered_btrfs_subvolumes
-                        .get(&device.name)
+                        .get(&device.uuid)
                         .unwrap()
                         .clone()
                 } else {
                     let subvolumes = list_subvolumes(device, args.show_btrfs_dot_snapshots);
-                    discovered_btrfs_subvolumes.insert(device.name.clone(), subvolumes.clone());
+                    discovered_btrfs_subvolumes.insert(device.uuid.clone(), subvolumes.clone());
                     subvolumes
                 };
                 let fstab_opt_subvolume_id: Option<usize> =
@@ -304,7 +325,7 @@ fn main() {
                 } else if let Some(subvolume_name) = fstab_opt_subvolume {
                     known_subvolumes.iter().find(|subvol| {
                         subvol.subvolume_name == subvolume_name
-                            || subvolume_name.strip_prefix('/').unwrap() == subvol.subvolume_name
+                            || subvolume_name.strip_prefix('/').unwrap_or_default() == subvol.subvolume_name
                     })
                 } else {
                     log::warn!("No subvolume specified in fstab, using root subvolume");
@@ -366,20 +387,12 @@ fn main() {
             continue;
         }
         if selected_device.fs_type == "btrfs" {
-            let subvolumes = if discovered_btrfs_subvolumes.contains_key(&selected_device.name) {
-                discovered_btrfs_subvolumes
-                    .get(&selected_device.name)
-                    .unwrap()
-                    .clone()
-            } else {
-                list_subvolumes(&selected_device, args.show_btrfs_dot_snapshots)
-            };
-            let selected_subvolume = if subvolumes.len() == 1 {
-                log::warn!("No subvolumes found, using root subvolume");
-                subvolumes[0].clone()
-            } else {
-                user_input::get_btrfs_subvolume(&mount_point, &subvolumes)
-            };
+            let selected_subvolume = get_btrfs_subvolume(
+                &selected_device,
+                &mut discovered_btrfs_subvolumes,
+                args.show_btrfs_dot_snapshots,
+                &mount_point,
+            );
             if mounted_partitions.contains(&selected_subvolume.get_id()) {
                 log::warn!("Partition already mounted, skipping...");
                 continue;
