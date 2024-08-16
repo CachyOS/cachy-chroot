@@ -1,14 +1,14 @@
 pub mod args;
 pub mod block_device;
 pub mod logger;
+pub mod luks;
 pub mod user_input;
+pub mod utils;
 
 use block_device::{BlockDevice, BlockOrSubvolumeID};
 
 use std::collections::HashMap;
-use std::fs::read_to_string;
-use std::path::{Path, PathBuf};
-use std::process::exit;
+use std::path::Path;
 
 use clap::Parser;
 use colored::Colorize;
@@ -17,32 +17,6 @@ use nix::unistd::Uid;
 use subprocess::Exec;
 use tempfile::TempDir;
 use which::which;
-
-fn print_error_and_exit(msg: &str) {
-    log::error!("{msg}");
-    exit(1);
-}
-
-fn crypto_open_luks_device(device: &block_device::BlockDevice) -> bool {
-    log::info!("Opening LUKS encrypted partition {}", device.name);
-    let result = Exec::cmd("cryptsetup")
-        .args(&["luksOpen", &device.name, &format!("luks-{}", &device.uuid)])
-        .join();
-    if result.is_err() || !result.unwrap().success() {
-        print_error_and_exit(&format!("Failed to open LUKS encrypted partition {}", device.name));
-    }
-    true
-}
-
-fn crypto_close_luks_device(device: &block_device::BlockDevice) -> bool {
-    log::info!("Closing LUKS encrypted partition {}", device.name);
-    let result =
-        Exec::cmd("cryptsetup").args(&["luksClose", &format!("luks-{}", &device.uuid)]).join();
-    if result.is_err() || !result.unwrap().success() {
-        log::warn!("Failed to close LUKS encrypted partition {}", device.name);
-    }
-    true
-}
 
 fn mount_block_device(
     device: &block_device::BlockDevice,
@@ -58,7 +32,7 @@ fn mount_block_device(
             log::warn!("Failed to mount partition {} at {}, skipping...", device.name, mount_point);
             return false;
         } else {
-            print_error_and_exit(&format!(
+            utils::print_error_and_exit(&format!(
                 "Failed to mount partition {} at {}",
                 device.name, mount_point
             ));
@@ -177,51 +151,13 @@ fn list_block_devices(ignored_devices: Option<Vec<BlockDevice>>) -> Vec<block_de
     block_devices.into_iter().filter(|d| !ignored_devices.contains(d)).collect()
 }
 
-fn list_crypttab_entries(
-    crypttab_path: &PathBuf,
-    has_luks_on_root: bool,
-) -> HashMap<String, String> {
-    let mut crypttab_entries: HashMap<String, String> = HashMap::new();
-
-    if !crypttab_path.exists() {
-        if has_luks_on_root {
-            log::warn!(
-                "Unable to find /etc/crypttab in the root partition, is this a valid root \
-                 partition? Good luck fixing that!",
-            );
-        }
-    } else {
-        let contents = read_to_string(crypttab_path);
-
-        if contents.is_err() {
-            log::error!("Failed to read /etc/crypttab, skipping...");
-            return crypttab_entries;
-        }
-
-        for line in contents.unwrap().lines() {
-            if line.starts_with('#') {
-                continue;
-            }
-            let parts = line.split_whitespace().collect::<Vec<_>>();
-            if parts.len() < 2 {
-                log::warn!("Invalid crypttab entry, skipping...");
-                continue;
-            }
-            let device = parts[1].trim_start_matches("UUID=");
-            crypttab_entries.insert(parts[0].to_string(), device.to_string());
-        }
-    }
-
-    crypttab_entries
-}
-
 fn main() {
     let args = args::Args::parse();
 
     logger::init_logger().expect("Failed to initialize logger");
 
     if !Uid::effective().is_root() && !args.skip_root_check {
-        print_error_and_exit(
+        utils::print_error_and_exit(
             "This program must be run as root, to skip this check use --skip-root-check",
         );
     }
@@ -237,7 +173,10 @@ fn main() {
 
     for (cmd, pkg) in &depends {
         if which(cmd).is_err() {
-            print_error_and_exit(&format!("Command {} not found, please install {}", cmd, pkg));
+            utils::print_error_and_exit(&format!(
+                "Command {} not found, please install {}",
+                cmd, pkg
+            ));
         }
     }
 
@@ -246,7 +185,7 @@ fn main() {
     log::info!("Found {} block devices", size);
 
     if size == 0 {
-        print_error_and_exit("No block devices found on the system");
+        utils::print_error_and_exit("No block devices found on the system");
     }
 
     let mut mounted_partitions: Vec<String> = Vec::new();
@@ -265,7 +204,7 @@ fn main() {
 
     if selected_device.fs_type == "crypto_LUKS" {
         has_luks_on_root = true;
-        crypto_open_luks_device(&selected_device);
+        luks::open_device(&selected_device);
         opened_luks_devices.push(selected_device.clone());
         block_devices = list_block_devices(Some(opened_luks_devices.to_owned()));
         selected_device = user_input::get_block_device("root", &block_devices, false)
@@ -299,7 +238,7 @@ fn main() {
     let ideal_fstab_path = Path::new(root_mount_point).join("etc").join("fstab");
     let ideal_crypttab_path = Path::new(root_mount_point).join("etc").join("crypttab");
 
-    let crypttab_entries = list_crypttab_entries(&ideal_crypttab_path, has_luks_on_root);
+    let crypttab_entries = luks::list_crypttab_entries(&ideal_crypttab_path, has_luks_on_root);
 
     if !ideal_fstab_path.exists() {
         log::warn!(
@@ -435,7 +374,7 @@ fn main() {
         }
         let mut selected_device = selected_device.unwrap();
         if selected_device.fs_type == "crypto_LUKS" {
-            crypto_open_luks_device(&selected_device);
+            luks::open_device(&selected_device);
             opened_luks_devices.push(selected_device.clone());
             block_devices = list_block_devices(Some(opened_luks_devices.to_owned()));
             let user_selection = user_input::get_block_device(&mount_point, &block_devices, true);
@@ -487,6 +426,6 @@ fn main() {
 
     umount_block_device(root_mount_point, true);
     for device in opened_luks_devices {
-        crypto_close_luks_device(&device);
+        luks::close_device(&device);
     }
 }
