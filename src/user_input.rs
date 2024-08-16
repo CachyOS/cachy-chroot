@@ -1,7 +1,8 @@
 use crate::block_device;
 
 use colored::Colorize;
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use dialoguer::theme::ColorfulTheme;
+use dialoguer::{Confirm, Input, Select};
 
 fn confirm_user_action<'a>(prompt_text: &'a str, theme: &'a ColorfulTheme) -> Confirm<'a> {
     Confirm::with_theme(theme)
@@ -12,21 +13,15 @@ fn confirm_user_action<'a>(prompt_text: &'a str, theme: &'a ColorfulTheme) -> Co
 }
 
 pub fn mount_additional_partitions() -> bool {
-    confirm_user_action(
-        "Do you want to mount additional partitions?",
-        &ColorfulTheme::default(),
-    )
-    .interact()
-    .unwrap()
+    confirm_user_action("Do you want to mount additional partitions?", &ColorfulTheme::default())
+        .interact()
+        .unwrap()
 }
 
 pub fn continue_on_mount_failure() -> bool {
-    confirm_user_action(
-        "Do you want to skip mounting this partition?",
-        &ColorfulTheme::default(),
-    )
-    .interact()
-    .unwrap()
+    confirm_user_action("Do you want to skip mounting this partition?", &ColorfulTheme::default())
+        .interact()
+        .unwrap()
 }
 
 pub fn use_cachyos_btrfs_preset() -> bool {
@@ -85,11 +80,8 @@ pub fn get_block_device(
         .default(0)
         .max_length(10)
         .items(block_devices);
-    let index = if allow_skip {
-        prompt.item("Skip").interact().ok()?
-    } else {
-        prompt.interact().ok()?
-    };
+    let index =
+        if allow_skip { prompt.item("Skip").interact().ok()? } else { prompt.interact().ok()? };
     if index == block_devices.len() {
         return None;
     }

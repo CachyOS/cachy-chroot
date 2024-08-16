@@ -17,11 +17,7 @@ pub struct BlockDevice {
 
 impl std::fmt::Display for BlockDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "Partition: {}: FS: {} UUID: {}",
-            self.name, self.fs_type, self.uuid
-        )
+        write!(f, "Partition: {}: FS: {} UUID: {}", self.name, self.fs_type, self.uuid)
     }
 }
 
@@ -40,11 +36,7 @@ pub struct BTRFSSubVolume {
 
 impl BTRFSSubVolume {
     pub fn new(device: BlockDevice, subvolume_id: usize, subvolume_name: String) -> Self {
-        BTRFSSubVolume {
-            device,
-            subvolume_id,
-            subvolume_name,
-        }
+        BTRFSSubVolume { device, subvolume_id, subvolume_name }
     }
 }
 

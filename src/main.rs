@@ -5,12 +5,10 @@ pub mod user_input;
 
 use block_device::{BlockDevice, BlockOrSubvolumeID};
 
-use std::{
-    collections::HashMap,
-    fs::read_to_string,
-    path::{Path, PathBuf},
-    process::exit,
-};
+use std::collections::HashMap;
+use std::fs::read_to_string;
+use std::path::{Path, PathBuf};
+use std::process::exit;
 
 use clap::Parser;
 use colored::Colorize;
@@ -31,19 +29,15 @@ fn crypto_open_luks_device(device: &block_device::BlockDevice) -> bool {
         .args(&["luksOpen", &device.name, &format!("luks-{}", &device.uuid)])
         .join();
     if result.is_err() || !result.unwrap().success() {
-        print_error_and_exit(&format!(
-            "Failed to open LUKS encrypted partition {}",
-            device.name
-        ));
+        print_error_and_exit(&format!("Failed to open LUKS encrypted partition {}", device.name));
     }
     true
 }
 
 fn crypto_close_luks_device(device: &block_device::BlockDevice) -> bool {
     log::info!("Closing LUKS encrypted partition {}", device.name);
-    let result = Exec::cmd("cryptsetup")
-        .args(&["luksClose", &format!("luks-{}", &device.uuid)])
-        .join();
+    let result =
+        Exec::cmd("cryptsetup").args(&["luksClose", &format!("luks-{}", &device.uuid)]).join();
     if result.is_err() || !result.unwrap().success() {
         log::warn!("Failed to close LUKS encrypted partition {}", device.name);
     }
@@ -57,24 +51,11 @@ fn mount_block_device(
     options: Option<Vec<String>>,
 ) -> bool {
     let options = options.unwrap_or_default();
-    log::info!(
-        "Mounting partition {} at {} with options: {:?}",
-        device.name,
-        mount_point,
-        options
-    );
-    let result = Exec::cmd("mount")
-        .arg(&device.name)
-        .arg(mount_point)
-        .args(&options)
-        .join();
+    log::info!("Mounting partition {} at {} with options: {:?}", device.name, mount_point, options);
+    let result = Exec::cmd("mount").arg(&device.name).arg(mount_point).args(&options).join();
     if result.is_err() || !result.unwrap().success() {
         if gracefully_fail && user_input::continue_on_mount_failure() {
-            log::warn!(
-                "Failed to mount partition {} at {}, skipping...",
-                device.name,
-                mount_point
-            );
+            log::warn!("Failed to mount partition {} at {}, skipping...", device.name, mount_point);
             return false;
         } else {
             print_error_and_exit(&format!(
@@ -87,16 +68,9 @@ fn mount_block_device(
 }
 
 fn umount_block_device(mount_point: &str, recursive: bool) {
-    let args = if recursive {
-        vec!["-R", mount_point]
-    } else {
-        vec![mount_point]
-    };
+    let args = if recursive { vec!["-R", mount_point] } else { vec![mount_point] };
     log::info!("Unmounting partition at {}", mount_point);
-    Exec::cmd("umount")
-        .args(&args)
-        .join()
-        .expect("Failed to unmount block device");
+    Exec::cmd("umount").args(&args).join().expect("Failed to unmount block device");
 }
 
 fn list_subvolumes(
@@ -151,10 +125,7 @@ fn get_btrfs_subvolume(
     device_name: &str,
 ) -> block_device::BTRFSSubVolume {
     let known_subvolumes = if discovered_btrfs_subvolumes.contains_key(&device.uuid) {
-        discovered_btrfs_subvolumes
-            .get(&device.uuid)
-            .unwrap()
-            .clone()
+        discovered_btrfs_subvolumes.get(&device.uuid).unwrap().clone()
     } else {
         let subvolumes = list_subvolumes(device, show_btrfs_dot_snapshots);
         discovered_btrfs_subvolumes.insert(device.uuid.clone(), subvolumes.clone());
@@ -164,9 +135,8 @@ fn get_btrfs_subvolume(
         log::warn!("No subvolumes found, using root subvolume");
         known_subvolumes[0].clone()
     } else if device_name == "root" {
-        let cachy_default_root_subvol = known_subvolumes
-            .iter()
-            .find(|subvol| subvol.subvolume_name == "@");
+        let cachy_default_root_subvol =
+            known_subvolumes.iter().find(|subvol| subvol.subvolume_name == "@");
         if cachy_default_root_subvol.is_some() && user_input::use_cachyos_btrfs_preset() {
             cachy_default_root_subvol.unwrap().clone()
         } else {
@@ -204,10 +174,7 @@ fn list_block_devices(ignored_devices: Option<Vec<BlockDevice>>) -> Vec<block_de
         return block_devices;
     }
 
-    block_devices
-        .into_iter()
-        .filter(|d| !ignored_devices.contains(d))
-        .collect()
+    block_devices.into_iter().filter(|d| !ignored_devices.contains(d)).collect()
 }
 
 fn list_crypttab_entries(
@@ -219,8 +186,9 @@ fn list_crypttab_entries(
     if !crypttab_path.exists() {
         if has_luks_on_root {
             log::warn!(
-            "Unable to find /etc/crypttab in the root partition, is this a valid root partition? Good luck fixing that!",
-        );
+                "Unable to find /etc/crypttab in the root partition, is this a valid root \
+                 partition? Good luck fixing that!",
+            );
         }
     } else {
         let contents = read_to_string(crypttab_path);
@@ -269,10 +237,7 @@ fn main() {
 
     for (cmd, pkg) in &depends {
         if which(cmd).is_err() {
-            print_error_and_exit(&format!(
-                "Command {} not found, please install {}",
-                cmd, pkg
-            ));
+            print_error_and_exit(&format!("Command {} not found, please install {}", cmd, pkg));
         }
     }
 
@@ -323,20 +288,13 @@ fn main() {
         mounted_partitions.push(selected_device.get_id());
     }
 
-    let tmp_dir = TempDir::with_prefix(format!(
-        "cachyos-chroot-root-mount-{}-",
-        &selected_device.uuid
-    ))
-    .expect("Failed to create temporary directory");
+    let tmp_dir =
+        TempDir::with_prefix(format!("cachyos-chroot-root-mount-{}-", &selected_device.uuid))
+            .expect("Failed to create temporary directory");
     let tmp_dir = tmp_dir.into_path();
     let root_mount_point = tmp_dir.to_str().unwrap();
 
-    mount_block_device(
-        &selected_device,
-        root_mount_point,
-        false,
-        Some(root_mount_options),
-    );
+    mount_block_device(&selected_device, root_mount_point, false, Some(root_mount_options));
 
     let ideal_fstab_path = Path::new(root_mount_point).join("etc").join("fstab");
     let ideal_crypttab_path = Path::new(root_mount_point).join("etc").join("crypttab");
@@ -345,7 +303,8 @@ fn main() {
 
     if !ideal_fstab_path.exists() {
         log::warn!(
-            "Unable to find /etc/fstab in the root partition, is this a valid root partition? Good luck fixing that!",
+            "Unable to find /etc/fstab in the root partition, is this a valid root partition? \
+             Good luck fixing that!",
         );
     } else if !args.no_auto_mount {
         log::info!("Mounting additional partitions based on /etc/fstab...");
@@ -378,18 +337,12 @@ fn main() {
                 })
             };
             if device.is_none() {
-                log::warn!(
-                    "Device {} not found, skipping mounting...",
-                    entry.fs_spec.yellow()
-                );
+                log::warn!("Device {} not found, skipping mounting...", entry.fs_spec.yellow());
                 continue;
             }
             let device = device.unwrap();
             if mounted_partitions.contains(&device.get_id()) {
-                log::warn!(
-                    "Partition {} already mounted, skipping...",
-                    entry.fs_spec.yellow()
-                );
+                log::warn!("Partition {} already mounted, skipping...", entry.fs_spec.yellow());
                 continue;
             }
             let actual_mount_point = Path::new(root_mount_point)
@@ -397,10 +350,7 @@ fn main() {
             let actual_mount_point = actual_mount_point.to_str().unwrap();
             if device.fs_type == "btrfs" {
                 let known_subvolumes = if discovered_btrfs_subvolumes.contains_key(&device.uuid) {
-                    discovered_btrfs_subvolumes
-                        .get(&device.uuid)
-                        .unwrap()
-                        .clone()
+                    discovered_btrfs_subvolumes.get(&device.uuid).unwrap().clone()
                 } else {
                     let subvolumes = list_subvolumes(device, args.show_btrfs_dot_snapshots);
                     discovered_btrfs_subvolumes.insert(device.uuid.clone(), subvolumes.clone());
@@ -423,9 +373,7 @@ fn main() {
                         }
                     });
                 let selected_subvolume = if let Some(subvolume_id) = fstab_opt_subvolume_id {
-                    known_subvolumes
-                        .iter()
-                        .find(|subvol| subvol.subvolume_id == subvolume_id)
+                    known_subvolumes.iter().find(|subvol| subvol.subvolume_id == subvolume_id)
                 } else if let Some(subvolume_name) = fstab_opt_subvolume {
                     known_subvolumes.iter().find(|subvol| {
                         subvol.subvolume_name == subvolume_name
