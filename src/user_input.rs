@@ -29,8 +29,8 @@ pub fn use_cachyos_btrfs_preset() -> bool {
         "Do you want to use CachyOS BTRFS preset to auto mount root subvolume?",
         &ColorfulTheme::default(),
     )
-    .interact()
-    .unwrap()
+        .interact()
+        .unwrap()
 }
 
 pub fn get_mount_point() -> String {
@@ -66,11 +66,11 @@ pub fn get_btrfs_subvolume(
     subvolumes[index].clone()
 }
 
-pub fn get_block_device(
+pub fn get_block_device<'a>(
     partition_name: &str,
-    block_devices: &[block_device::BlockDevice],
+    block_devices: &'a [block_device::BlockDevice],
     allow_skip: bool,
-) -> Option<block_device::BlockDevice> {
+) -> Option<&'a block_device::BlockDevice> {
     let default_theme = ColorfulTheme::default();
     let prompt = Select::with_theme(&default_theme)
         .with_prompt(format!(
@@ -85,5 +85,5 @@ pub fn get_block_device(
     if index == block_devices.len() {
         return None;
     }
-    Some(block_devices[index].clone())
+    Some(&block_devices[index])
 }

@@ -5,7 +5,7 @@ pub mod luks;
 pub mod user_input;
 pub mod utils;
 
-use block_device::{BlockDevice, BlockOrSubvolumeID};
+use block_device::{BTRFSSubVolume, BlockDevice, BlockOrSubvolumeID};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -19,7 +19,7 @@ use tempfile::TempDir;
 use which::which;
 
 fn mount_block_device(
-    device: &block_device::BlockDevice,
+    device: &BlockDevice,
     mount_point: &str,
     gracefully_fail: bool,
     options: Option<Vec<String>>,
@@ -48,9 +48,9 @@ fn umount_block_device(mount_point: &str, recursive: bool) {
 }
 
 fn list_subvolumes(
-    device: &block_device::BlockDevice,
+    device: &BlockDevice,
     include_dot_snapshots: bool,
-) -> Vec<block_device::BTRFSSubVolume> {
+) -> Vec<BTRFSSubVolume> {
     let tmp_dir = TempDir::with_prefix(format!("cachyos-chroot-temp-mount-{}-", &device.uuid))
         .expect("Failed to create temporary directory");
     let tmp_dir = tmp_dir.into_path();
@@ -64,7 +64,7 @@ fn list_subvolumes(
         .expect("Failed to list BTRFS subvolumes")
         .stdout_str();
     let subvolume_lines = subvolumes_raw.trim().split('\n').collect::<Vec<_>>();
-    let mut subvolumes = vec![block_device::BTRFSSubVolume {
+    let mut subvolumes = vec![BTRFSSubVolume {
         device: device.clone(),
         subvolume_id: 5,
         subvolume_name: "/".to_owned(),
@@ -79,7 +79,7 @@ fn list_subvolumes(
             if subvolume_name.starts_with(".snapshots") && !include_dot_snapshots {
                 continue;
             }
-            subvolumes.push(block_device::BTRFSSubVolume::new(
+            subvolumes.push(BTRFSSubVolume::new(
                 device.clone(),
                 subvolume_id.parse().unwrap(),
                 subvolume_name.to_string(),
@@ -93,11 +93,11 @@ fn list_subvolumes(
 }
 
 fn get_btrfs_subvolume(
-    device: &block_device::BlockDevice,
-    discovered_btrfs_subvolumes: &mut HashMap<String, Vec<block_device::BTRFSSubVolume>>,
+    device: &BlockDevice,
+    discovered_btrfs_subvolumes: &mut HashMap<String, Vec<BTRFSSubVolume>>,
     show_btrfs_dot_snapshots: bool,
     device_name: &str,
-) -> block_device::BTRFSSubVolume {
+) -> BTRFSSubVolume {
     let known_subvolumes = if discovered_btrfs_subvolumes.contains_key(&device.uuid) {
         discovered_btrfs_subvolumes.get(&device.uuid).unwrap().clone()
     } else {
@@ -122,7 +122,7 @@ fn get_btrfs_subvolume(
     selected_subvolume
 }
 
-fn list_block_devices(ignored_devices: Option<Vec<BlockDevice>>) -> Vec<block_device::BlockDevice> {
+fn list_block_devices(ignored_devices: Option<Vec<BlockDevice>>) -> Vec<BlockDevice> {
     let disks_raw = Exec::cmd("lsblk")
         .args(&[
             "-f",
@@ -196,7 +196,7 @@ fn main() {
 
     let mut selected_device = user_input::get_block_device("root", &block_devices, false)
         .expect("No block device selected for root partition");
-    let mut discovered_btrfs_subvolumes: HashMap<String, Vec<block_device::BTRFSSubVolume>> =
+    let mut discovered_btrfs_subvolumes: HashMap<String, Vec<BTRFSSubVolume>> =
         HashMap::new();
     let mut root_mount_options: Vec<String> = Vec::new();
     let mut opened_luks_devices: Vec<BlockDevice> = Vec::new();
@@ -204,7 +204,7 @@ fn main() {
 
     if selected_device.fs_type == "crypto_LUKS" {
         has_luks_on_root = true;
-        luks::open_device(&selected_device);
+        luks::open_device(selected_device);
         opened_luks_devices.push(selected_device.clone());
         block_devices = list_block_devices(Some(opened_luks_devices.to_owned()));
         selected_device = user_input::get_block_device("root", &block_devices, false)
@@ -216,7 +216,7 @@ fn main() {
         log::info!("Selected BTRFS partition, mounting and listing subvolumes...");
 
         let selected_subvolume = get_btrfs_subvolume(
-            &selected_device,
+            selected_device,
             &mut discovered_btrfs_subvolumes,
             args.show_btrfs_dot_snapshots,
             "root",
@@ -233,7 +233,7 @@ fn main() {
     let tmp_dir = tmp_dir.into_path();
     let root_mount_point = tmp_dir.to_str().unwrap();
 
-    mount_block_device(&selected_device, root_mount_point, false, Some(root_mount_options));
+    mount_block_device(selected_device, root_mount_point, false, Some(root_mount_options));
 
     let ideal_fstab_path = Path::new(root_mount_point).join("etc").join("fstab");
     let ideal_crypttab_path = Path::new(root_mount_point).join("etc").join("crypttab");
@@ -317,7 +317,7 @@ fn main() {
                     known_subvolumes.iter().find(|subvol| {
                         subvol.subvolume_name == subvolume_name
                             || subvolume_name.strip_prefix('/').unwrap_or_default()
-                                == subvol.subvolume_name
+                            == subvol.subvolume_name
                     })
                 } else {
                     log::warn!("No subvolume specified in fstab, using root subvolume");
@@ -374,7 +374,7 @@ fn main() {
         }
         let mut selected_device = selected_device.unwrap();
         if selected_device.fs_type == "crypto_LUKS" {
-            luks::open_device(&selected_device);
+            luks::open_device(selected_device);
             opened_luks_devices.push(selected_device.clone());
             block_devices = list_block_devices(Some(opened_luks_devices.to_owned()));
             let user_selection = user_input::get_block_device(&mount_point, &block_devices, true);
@@ -389,7 +389,7 @@ fn main() {
         }
         if selected_device.fs_type == "btrfs" {
             let selected_subvolume = get_btrfs_subvolume(
-                &selected_device,
+                selected_device,
                 &mut discovered_btrfs_subvolumes,
                 args.show_btrfs_dot_snapshots,
                 &mount_point,
@@ -411,7 +411,7 @@ fn main() {
             }
             continue;
         }
-        if mount_block_device(&selected_device, actual_mount_point, true, None) {
+        if mount_block_device(selected_device, actual_mount_point, true, None) {
             mounted_partitions.push(selected_device.get_id());
         }
     }
