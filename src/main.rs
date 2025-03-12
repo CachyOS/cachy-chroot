@@ -132,7 +132,7 @@ fn list_block_devices(ignored_devices: Option<Vec<BlockDevice>>) -> Vec<BlockDev
             "-a",
             "-J",
             "-Q",
-            "type=='part' || type=='crypt' && fstype!='swap' && fstype",
+            "type=='part' || type=='crypt' && fstype!='swap' && fstype && uuid",
         ])
         .capture()
         .expect("Failed to run lsblk")
