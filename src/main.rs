@@ -1,11 +1,15 @@
 pub mod args;
 pub mod block_device;
+pub mod depends;
+pub mod features;
 pub mod logger;
 pub mod luks;
 pub mod user_input;
 pub mod utils;
 
 use block_device::{BTRFSSubVolume, BlockDevice, BlockOrSubvolumeID};
+use depends::DEPENDS;
+use features::Features;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -17,6 +21,30 @@ use nix::unistd::Uid;
 use subprocess::Exec;
 use tempfile::TempDir;
 use which::which;
+
+fn get_enabled_features_from_depends() -> Features {
+    let mut enabled_features = Features::empty();
+    for dependency in &DEPENDS {
+        if which(dependency.command).is_err() {
+            if dependency.required {
+                utils::print_error_and_exit(&format!(
+                    "Required binary not found in path: {}, please install the suggested package: {}",
+                    dependency.command, dependency.package
+                ));
+            } else {
+                log::warn!(
+                    "Optional binary not found in path: {}, suggested package: {}, disabled features: {}",
+                    dependency.command.red(),
+                    dependency.package.green(),
+                    dependency.optional_features_description.yellow()
+                );
+            }
+        } else {
+            enabled_features |= dependency.features;
+        }
+    }
+    enabled_features
+}
 
 fn mount_block_device(
     device: &BlockDevice,
@@ -158,23 +186,13 @@ fn main() {
         );
     }
 
-    let depends = [
-        ("lsblk", "util-linux"),
-        ("mount", "util-linux"),
-        ("umount", "util-linux"),
-        ("arch-chroot", "arch-install-scripts"),
-        ("btrfs", "btrfs-progs"),
-        ("cryptsetup", "cryptsetup"),
-    ];
-
-    for (cmd, pkg) in &depends {
-        if which(cmd).is_err() {
-            utils::print_error_and_exit(&format!(
-                "Command {} not found, please install {}",
-                cmd, pkg
-            ));
-        }
+    if args.skip_root_check {
+        log::warn!(
+            "Root permission check skipped, make sure you have the necessary permissions to run this program"
+        );
     }
+
+    let features = get_enabled_features_from_depends();
 
     let mut block_devices = list_block_devices(None);
     let size = block_devices.len();
@@ -198,6 +216,11 @@ fn main() {
     let mut has_luks_on_root = false;
 
     if selected_device.fs_type == "crypto_LUKS" {
+        if !features.contains(Features::LUKS) {
+            utils::print_error_and_exit(
+                "LUKS encrypted partition selected but LUKS support is disabled or missing required binaries in PATH",
+            );
+        }
         has_luks_on_root = true;
         luks::open_device(selected_device);
         opened_luks_devices.push(selected_device.clone());
@@ -207,6 +230,11 @@ fn main() {
     }
 
     if selected_device.fs_type == "btrfs" {
+        if !features.contains(Features::BTRFS) {
+            utils::print_error_and_exit(
+                "BTRFS partition selected but BTRFS support is disabled or missing required binaries in PATH",
+            );
+        }
         root_mount_options.push("-o".to_owned());
         log::info!("Selected BTRFS partition, mounting and listing subvolumes...");
 
@@ -237,8 +265,7 @@ fn main() {
 
     if !ideal_fstab_path.exists() {
         log::warn!(
-            "Unable to find /etc/fstab in the root partition, is this a valid root partition? \
-             Good luck fixing that!",
+            "Unable to find /etc/fstab in the root partition, is this a valid root partition? Good luck fixing that!",
         );
     } else if !args.no_auto_mount {
         log::info!("Mounting additional partitions based on /etc/fstab...");

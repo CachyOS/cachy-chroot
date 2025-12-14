@@ -6,6 +6,7 @@ license = "BSD-3-Clause"
 edition = "2024"
 
 [dependencies]
+bitflags = "2.10"
 clap = { version = "4", features = ["std", "derive"] }
 colored = "3"
 dialoguer = { version = "0.12", default-features = false }
