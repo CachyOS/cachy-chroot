@@ -47,13 +47,10 @@ fn umount_block_device(mount_point: &str, recursive: bool) {
     Exec::cmd("umount").args(&args).join().expect("Failed to unmount block device");
 }
 
-fn list_subvolumes(
-    device: &BlockDevice,
-    include_dot_snapshots: bool,
-) -> Vec<BTRFSSubVolume> {
+fn list_subvolumes(device: &BlockDevice, include_dot_snapshots: bool) -> Vec<BTRFSSubVolume> {
     let tmp_dir = TempDir::with_prefix(format!("cachyos-chroot-temp-mount-{}-", &device.uuid))
         .expect("Failed to create temporary directory");
-    let tmp_dir = tmp_dir.into_path();
+    let tmp_dir = tmp_dir.keep();
     let mount_point = tmp_dir.to_str().unwrap();
 
     mount_block_device(device, mount_point, false, None);
@@ -105,7 +102,7 @@ fn get_btrfs_subvolume(
         discovered_btrfs_subvolumes.insert(device.uuid.clone(), subvolumes.clone());
         subvolumes
     };
-    let selected_subvolume = if known_subvolumes.len() == 1 {
+    if known_subvolumes.len() == 1 {
         log::warn!("No subvolumes found, using root subvolume");
         known_subvolumes[0].clone()
     } else if device_name == "root" {
@@ -118,8 +115,7 @@ fn get_btrfs_subvolume(
         }
     } else {
         user_input::get_btrfs_subvolume(device_name, &known_subvolumes)
-    };
-    selected_subvolume
+    }
 }
 
 fn list_block_devices(ignored_devices: Option<Vec<BlockDevice>>) -> Vec<BlockDevice> {
@@ -191,13 +187,12 @@ fn main() {
     let mut mounted_partitions: Vec<String> = Vec::new();
 
     for disk in &block_devices {
-        log::info!("Found partition: {}", disk.to_string());
+        log::info!("Found partition: {}", disk);
     }
 
     let mut selected_device = user_input::get_block_device("root", &block_devices, false)
         .expect("No block device selected for root partition");
-    let mut discovered_btrfs_subvolumes: HashMap<String, Vec<BTRFSSubVolume>> =
-        HashMap::new();
+    let mut discovered_btrfs_subvolumes: HashMap<String, Vec<BTRFSSubVolume>> = HashMap::new();
     let mut root_mount_options: Vec<String> = Vec::new();
     let mut opened_luks_devices: Vec<BlockDevice> = Vec::new();
     let mut has_luks_on_root = false;
@@ -230,7 +225,7 @@ fn main() {
     let tmp_dir =
         TempDir::with_prefix(format!("cachyos-chroot-root-mount-{}-", &selected_device.uuid))
             .expect("Failed to create temporary directory");
-    let tmp_dir = tmp_dir.into_path();
+    let tmp_dir = tmp_dir.keep();
     let root_mount_point = tmp_dir.to_str().unwrap();
 
     mount_block_device(selected_device, root_mount_point, false, Some(root_mount_options));
@@ -317,7 +312,7 @@ fn main() {
                     known_subvolumes.iter().find(|subvol| {
                         subvol.subvolume_name == subvolume_name
                             || subvolume_name.strip_prefix('/').unwrap_or_default()
-                            == subvol.subvolume_name
+                                == subvol.subvolume_name
                     })
                 } else {
                     log::warn!("No subvolume specified in fstab, using root subvolume");
@@ -419,8 +414,11 @@ fn main() {
     log::info!("Chrooting into the configured root partition...");
     log::info!("To exit the chroot, type 'exit' or press Ctrl+D");
 
+    let mount_options =
+        if args.no_systemd_chroot { vec![root_mount_point] } else { vec!["-S", root_mount_point] };
+
     Exec::cmd("arch-chroot")
-        .arg(root_mount_point)
+        .args(&mount_options)
         .join()
         .expect("Failed to chroot into root partition");
 

@@ -29,8 +29,8 @@ pub fn use_cachyos_btrfs_preset() -> bool {
         "Do you want to use CachyOS BTRFS preset to auto mount root subvolume?",
         &ColorfulTheme::default(),
     )
-        .interact()
-        .unwrap()
+    .interact()
+    .unwrap()
 }
 
 pub fn get_mount_point() -> String {

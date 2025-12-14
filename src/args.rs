@@ -16,4 +16,10 @@ pub struct Args {
     /// mounted
     #[arg(long = "no-auto-mount", default_value_t = false)]
     pub no_auto_mount: bool,
+
+    /// Disables arch-chroot systemd mode which spawns a transient systemd instance via systemd-run
+    /// inside the chroot. This is useful if you cannot update arch-install-scripts package which
+    /// provides this functionality.
+    #[arg(long = "no-systemd-chroot", default_value_t = false)]
+    pub no_systemd_chroot: bool,
 }
