@@ -3,23 +3,23 @@ name = "cachy-chroot"
 version = "1.2.1"
 authors = ["SoulHarsh007 <harsh.peshwani@outlook.com>"]
 license = "BSD-3-Clause"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-clap = { version = "4", features = ["std", "derive"] } # we want all goodies
-colored = "2"
-dialoguer = { version = "0.11", default-features = false }
+clap = { version = "4", features = ["std", "derive"] }
+colored = "3"
+dialoguer = { version = "0.12", default-features = false }
 fstab = "0.4"
 log = { version = "0.4", default-features = false }
-nix = { version = "0.29", features = ["user"], default-features = false }
+nix = { version = "0.30", features = ["user"], default-features = false }
 serde = { version = "1.0", features = ["derive"], default-features = false }
 serde_json = "1.0"
 subprocess = "0.2"
-tempfile = "3.10"
-which = "6"
+tempfile = "3"
+which = "8"
 
 [build-dependencies]
-clap = { version = "4", features = ["derive"] } # we want all goodies
+clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 
 [profile.release]
