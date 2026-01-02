@@ -1,8 +1,9 @@
-use crate::block_device;
+use crate::zfs::{self, ZFSDataSetUtils};
+use crate::{block_device, btrfs};
 
 use colored::Colorize;
 use dialoguer::theme::ColorfulTheme;
-use dialoguer::{Confirm, Input, Select};
+use dialoguer::{Confirm, Input, MultiSelect, Select};
 
 fn confirm_user_action<'a>(prompt_text: &'a str, theme: &'a ColorfulTheme) -> Confirm<'a> {
     Confirm::with_theme(theme)
@@ -24,6 +25,33 @@ pub fn continue_on_mount_failure() -> bool {
         .unwrap()
 }
 
+pub fn allow_zfs_forced_import() -> bool {
+    confirm_user_action(
+        "Failed to import ZFS Pool, do you want to force zfs pool import?",
+        &ColorfulTheme::default(),
+    )
+    .interact()
+    .unwrap()
+}
+
+pub fn allow_zfs_forced_export() -> bool {
+    confirm_user_action(
+        "Failed to export ZFS Pool, do you want to force zfs pool export?",
+        &ColorfulTheme::default(),
+    )
+    .interact()
+    .unwrap()
+}
+
+pub fn retry_zfs_passphrase(dataset: &str) -> bool {
+    confirm_user_action(
+        &format!("Do you want to retry entering the ZFS passphrase for dataset: {}?", dataset),
+        &ColorfulTheme::default(),
+    )
+    .interact()
+    .unwrap()
+}
+
 pub fn use_cachyos_btrfs_preset() -> bool {
     confirm_user_action(
         "Do you want to use CachyOS BTRFS preset to auto mount root subvolume?",
@@ -34,6 +62,12 @@ pub fn use_cachyos_btrfs_preset() -> bool {
 }
 
 pub fn get_mount_point() -> String {
+    log::warn!(
+        "NOTE: Mountpoint is ignored for ZFS datasets as they manage their own mountpoints. If \
+         you want to select a ZFS dataset with a custom mountpoint, please do so manually after \
+         chrooting. If you want to use default mountpoint for a ZFS dataset, just type '/' when \
+         prompted for mountpoint."
+    );
     Input::with_theme(&ColorfulTheme::default())
         .with_prompt(
             "Enter the mount point for additional partition (e.g. /boot) type 'skip' to cancel: ",
@@ -51,8 +85,8 @@ pub fn get_mount_point() -> String {
 
 pub fn get_btrfs_subvolume(
     partition_name: &str,
-    subvolumes: &[block_device::BTRFSSubVolume],
-) -> block_device::BTRFSSubVolume {
+    subvolumes: &[btrfs::BTRFSSubVolume],
+) -> btrfs::BTRFSSubVolume {
     let index = Select::with_theme(&ColorfulTheme::default())
         .with_prompt(format!(
             "Select the subvolume for the {} partition (use arrow keys): ",
@@ -64,6 +98,33 @@ pub fn get_btrfs_subvolume(
         .interact()
         .unwrap();
     subvolumes[index].clone()
+}
+
+pub fn get_zfs_datasets(
+    zfs_pool_name: &str,
+    datasets: &[zfs::ZFSDataSet],
+    allow_empty: bool,
+) -> Vec<usize> {
+    log::info!(
+        "Use [Spacebar] to select datasets, and [Enter] to confirm selection. Some datasets may \
+         already be mounted and will be indicated as such. Use arrow keys to navigate the list."
+    );
+    let default_theme = ColorfulTheme::default();
+    let prompt = MultiSelect::with_theme(&default_theme)
+        .with_prompt(format!(
+            "Select the zfs datasets to import from the zfs pool: {}: ",
+            zfs_pool_name.yellow()
+        ))
+        .max_length(10)
+        .items_checked(
+            datasets.iter().map(|dataset| (dataset, dataset.is_mounted())).collect::<Vec<_>>(),
+        );
+    let mut selection = prompt.clone().interact().unwrap();
+    while selection.is_empty() && !allow_empty {
+        log::error!("You must select at least one dataset, please try again.");
+        selection = prompt.clone().interact().unwrap();
+    }
+    selection
 }
 
 pub fn get_block_device<'a>(

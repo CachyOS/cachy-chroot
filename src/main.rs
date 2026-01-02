@@ -1,17 +1,18 @@
 pub mod args;
 pub mod block_device;
+pub mod btrfs;
 pub mod depends;
 pub mod features;
 pub mod logger;
 pub mod luks;
 pub mod user_input;
 pub mod utils;
+pub mod zfs;
 
-use block_device::{BTRFSSubVolume, BlockDevice, BlockOrSubvolumeID};
-use depends::DEPENDS;
-use features::Features;
+use crate::block_device::{BlockDeviceUtils, BlockOrSubvolumeID};
+use crate::zfs::ZFSDataSetUtils;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use clap::Parser;
@@ -20,160 +21,6 @@ use fstab::FsTab;
 use nix::unistd::Uid;
 use subprocess::Exec;
 use tempfile::TempDir;
-use which::which;
-
-fn get_enabled_features_from_depends() -> Features {
-    let mut enabled_features = Features::empty();
-    for dependency in &DEPENDS {
-        if which(dependency.command).is_err() {
-            if dependency.required {
-                utils::print_error_and_exit(&format!(
-                    "Required binary not found in path: {}, please install the suggested package: {}",
-                    dependency.command, dependency.package
-                ));
-            } else {
-                log::warn!(
-                    "Optional binary not found in path: {}, suggested package: {}, disabled features: {}",
-                    dependency.command.red(),
-                    dependency.package.green(),
-                    dependency.optional_features_description.yellow()
-                );
-            }
-        } else {
-            enabled_features |= dependency.features;
-        }
-    }
-    enabled_features
-}
-
-fn mount_block_device(
-    device: &BlockDevice,
-    mount_point: &str,
-    gracefully_fail: bool,
-    options: Option<Vec<String>>,
-) -> bool {
-    let options = options.unwrap_or_default();
-    log::info!("Mounting partition {} at {} with options: {:?}", device.name, mount_point, options);
-    let result = Exec::cmd("mount").arg(&device.name).arg(mount_point).args(&options).join();
-    if result.is_err() || !result.unwrap().success() {
-        if gracefully_fail && user_input::continue_on_mount_failure() {
-            log::warn!("Failed to mount partition {} at {}, skipping...", device.name, mount_point);
-            return false;
-        } else {
-            utils::print_error_and_exit(&format!(
-                "Failed to mount partition {} at {}",
-                device.name, mount_point
-            ));
-        }
-    }
-    true
-}
-
-fn umount_block_device(mount_point: &str, recursive: bool) {
-    let args = if recursive { vec!["-R", mount_point] } else { vec![mount_point] };
-    log::info!("Unmounting partition at {}", mount_point);
-    Exec::cmd("umount").args(&args).join().expect("Failed to unmount block device");
-}
-
-fn list_subvolumes(device: &BlockDevice, include_dot_snapshots: bool) -> Vec<BTRFSSubVolume> {
-    let tmp_dir = TempDir::with_prefix(format!("cachyos-chroot-temp-mount-{}-", &device.uuid))
-        .expect("Failed to create temporary directory");
-    let tmp_dir = tmp_dir.keep();
-    let mount_point = tmp_dir.to_str().unwrap();
-
-    mount_block_device(device, mount_point, false, None);
-
-    let subvolumes_raw = Exec::cmd("btrfs")
-        .args(&["subvolume", "list", "-t", mount_point])
-        .capture()
-        .expect("Failed to list BTRFS subvolumes")
-        .stdout_str();
-    let subvolume_lines = subvolumes_raw.trim().split('\n').collect::<Vec<_>>();
-    let mut subvolumes = vec![BTRFSSubVolume {
-        device: device.clone(),
-        subvolume_id: 5,
-        subvolume_name: "/".to_owned(),
-    }];
-
-    for subvolume in &subvolume_lines[2..] {
-        let subvolume_parts = subvolume.split_whitespace().collect::<Vec<_>>();
-
-        if subvolume_parts.len() == 4 {
-            let subvolume_id = subvolume_parts[0];
-            let subvolume_name = subvolume_parts[3];
-            if subvolume_name.starts_with(".snapshots") && !include_dot_snapshots {
-                continue;
-            }
-            subvolumes.push(BTRFSSubVolume::new(
-                device.clone(),
-                subvolume_id.parse().unwrap(),
-                subvolume_name.to_string(),
-            ));
-        }
-    }
-
-    umount_block_device(mount_point, false);
-
-    subvolumes
-}
-
-fn get_btrfs_subvolume(
-    device: &BlockDevice,
-    discovered_btrfs_subvolumes: &mut HashMap<String, Vec<BTRFSSubVolume>>,
-    show_btrfs_dot_snapshots: bool,
-    device_name: &str,
-) -> BTRFSSubVolume {
-    let known_subvolumes = if discovered_btrfs_subvolumes.contains_key(&device.uuid) {
-        discovered_btrfs_subvolumes.get(&device.uuid).unwrap().clone()
-    } else {
-        let subvolumes = list_subvolumes(device, show_btrfs_dot_snapshots);
-        discovered_btrfs_subvolumes.insert(device.uuid.clone(), subvolumes.clone());
-        subvolumes
-    };
-    if known_subvolumes.len() == 1 {
-        log::warn!("No subvolumes found, using root subvolume");
-        known_subvolumes[0].clone()
-    } else if device_name == "root" {
-        let cachy_default_root_subvol =
-            known_subvolumes.iter().find(|subvol| subvol.subvolume_name == "@");
-        if cachy_default_root_subvol.is_some() && user_input::use_cachyos_btrfs_preset() {
-            cachy_default_root_subvol.unwrap().clone()
-        } else {
-            user_input::get_btrfs_subvolume(device_name, &known_subvolumes)
-        }
-    } else {
-        user_input::get_btrfs_subvolume(device_name, &known_subvolumes)
-    }
-}
-
-fn list_block_devices(ignored_devices: Option<Vec<BlockDevice>>) -> Vec<BlockDevice> {
-    let disks_raw = Exec::cmd("lsblk")
-        .args(&[
-            "-f",
-            "-o",
-            "NAME,FSTYPE,UUID,PARTUUID,LABEL,PARTLABEL",
-            "-p",
-            "-a",
-            "-J",
-            "-Q",
-            "type=='part' || type=='crypt' && fstype!='swap' && fstype && uuid",
-        ])
-        .capture()
-        .expect("Failed to run lsblk")
-        .stdout_str();
-
-    let disks: block_device::BlockDevices =
-        serde_json::from_str(&disks_raw).expect("Failed to parse lsblk output");
-
-    let ignored_devices = ignored_devices.unwrap_or_default();
-    let block_devices = disks.block_devices;
-
-    if ignored_devices.is_empty() {
-        return block_devices;
-    }
-
-    block_devices.into_iter().filter(|d| !ignored_devices.contains(d)).collect()
-}
 
 fn main() {
     let args = args::Args::parse();
@@ -188,13 +35,14 @@ fn main() {
 
     if args.skip_root_check {
         log::warn!(
-            "Root permission check skipped, make sure you have the necessary permissions to run this program"
+            "Root permission check skipped, make sure you have the necessary permissions to run \
+             this program"
         );
     }
 
-    let features = get_enabled_features_from_depends();
+    let features = features::get_enabled_features_from_depends();
 
-    let mut block_devices = list_block_devices(None);
+    let mut block_devices = block_device::list_block_devices(None);
     let size = block_devices.len();
     log::info!("Found {} block devices", size);
 
@@ -210,44 +58,27 @@ fn main() {
 
     let mut selected_device = user_input::get_block_device("root", &block_devices, false)
         .expect("No block device selected for root partition");
-    let mut discovered_btrfs_subvolumes: HashMap<String, Vec<BTRFSSubVolume>> = HashMap::new();
+    let mut discovered_btrfs_subvolumes: HashMap<String, Vec<btrfs::BTRFSSubVolume>> =
+        HashMap::new();
     let mut root_mount_options: Vec<String> = Vec::new();
-    let mut opened_luks_devices: Vec<BlockDevice> = Vec::new();
+    let mut opened_luks_devices: Vec<block_device::BlockDevice> = Vec::new();
+    let mut imported_zfs_pools: Vec<block_device::BlockDevice> = Vec::new();
+    let mut loaded_zfs_keys: HashSet<String> = HashSet::new();
     let mut has_luks_on_root = false;
 
-    if selected_device.fs_type == "crypto_LUKS" {
-        if !features.contains(Features::LUKS) {
+    if selected_device.is_crypto_luks() {
+        if !features.contains(features::Features::LUKS) {
             utils::print_error_and_exit(
-                "LUKS encrypted partition selected but LUKS support is disabled or missing required binaries in PATH",
+                "LUKS encrypted partition selected but LUKS support is disabled or missing \
+                 required binaries in PATH",
             );
         }
         has_luks_on_root = true;
         luks::open_device(selected_device);
         opened_luks_devices.push(selected_device.clone());
-        block_devices = list_block_devices(Some(opened_luks_devices.to_owned()));
+        block_devices = block_device::list_block_devices(Some(opened_luks_devices.to_owned()));
         selected_device = user_input::get_block_device("root", &block_devices, false)
             .expect("No block device selected for root partition");
-    }
-
-    if selected_device.fs_type == "btrfs" {
-        if !features.contains(Features::BTRFS) {
-            utils::print_error_and_exit(
-                "BTRFS partition selected but BTRFS support is disabled or missing required binaries in PATH",
-            );
-        }
-        root_mount_options.push("-o".to_owned());
-        log::info!("Selected BTRFS partition, mounting and listing subvolumes...");
-
-        let selected_subvolume = get_btrfs_subvolume(
-            selected_device,
-            &mut discovered_btrfs_subvolumes,
-            args.show_btrfs_dot_snapshots,
-            "root",
-        );
-        mounted_partitions.push(selected_subvolume.get_id());
-        root_mount_options.push(format!("subvolid={}", selected_subvolume.subvolume_id));
-    } else {
-        mounted_partitions.push(selected_device.get_id());
     }
 
     let tmp_dir =
@@ -256,7 +87,67 @@ fn main() {
     let tmp_dir = tmp_dir.keep();
     let root_mount_point = tmp_dir.to_str().unwrap();
 
-    mount_block_device(selected_device, root_mount_point, false, Some(root_mount_options));
+    if selected_device.is_btrfs() {
+        if !features.contains(features::Features::BTRFS) {
+            utils::print_error_and_exit(
+                "BTRFS partition selected but BTRFS support is disabled or missing required \
+                 binaries in PATH",
+            );
+        }
+        root_mount_options.push("-o".to_owned());
+        log::info!("Selected BTRFS partition, mounting and listing subvolumes...");
+
+        let selected_subvolume = btrfs::get_btrfs_subvolume(
+            selected_device,
+            &mut discovered_btrfs_subvolumes,
+            args.show_btrfs_dot_snapshots,
+            "root",
+        );
+        mounted_partitions.push(selected_subvolume.get_id());
+        root_mount_options.push(format!("subvolid={}", selected_subvolume.subvolume_id));
+    } else if selected_device.is_zfs_member() {
+        if !features.contains(features::Features::ZFS) {
+            utils::print_error_and_exit(
+                "ZFS partition selected but ZFS support is disabled or missing required binaries \
+                 in PATH",
+            );
+        }
+        zfs::import_zfs_pool(selected_device, root_mount_point);
+        imported_zfs_pools.push(selected_device.clone());
+        let mut zfs_datasets =
+            zfs::list_zfs_mountable_datasets(selected_device, &mut loaded_zfs_keys);
+        if zfs_datasets.is_empty() {
+            utils::print_error_and_exit(
+                "No mountable ZFS datasets found in the selected partition",
+            );
+        }
+        log::info!("Found {} mountable ZFS datasets", zfs_datasets.len());
+        let selection =
+            user_input::get_zfs_datasets(&selected_device.get_id(), &zfs_datasets, false);
+        for (i, dataset) in zfs_datasets.iter_mut().enumerate() {
+            if selection.contains(&i) {
+                zfs::mount_zfs_dataset(dataset, root_mount_point, true);
+            } else if dataset.is_mounted() {
+                zfs::unmount_zfs_dataset(dataset);
+            }
+        }
+        zfs_datasets.iter().for_each(|zfs_dataset| {
+            if zfs_dataset.is_mounted() {
+                mounted_partitions.push(zfs_dataset.get_id());
+            }
+        });
+    } else {
+        mounted_partitions.push(selected_device.get_id());
+    }
+
+    if !selected_device.is_zfs_member() {
+        block_device::mount_block_device(
+            selected_device,
+            root_mount_point,
+            false,
+            Some(root_mount_options),
+        );
+    }
 
     let ideal_fstab_path = Path::new(root_mount_point).join("etc").join("fstab");
     let ideal_crypttab_path = Path::new(root_mount_point).join("etc").join("crypttab");
@@ -265,7 +156,8 @@ fn main() {
 
     if !ideal_fstab_path.exists() {
         log::warn!(
-            "Unable to find /etc/fstab in the root partition, is this a valid root partition? Good luck fixing that!",
+            "Unable to find /etc/fstab in the root partition, is this a valid root partition? \
+             Good luck fixing that!",
         );
     } else if !args.no_auto_mount {
         log::info!("Mounting additional partitions based on /etc/fstab...");
@@ -276,25 +168,11 @@ fn main() {
             if entry.vfs_type == "swap" {
                 continue;
             }
-            let device = if entry.fs_spec.starts_with("/dev") {
+            let device = {
                 let crypttab_entry = crypttab_entries.get(&entry.fs_spec);
                 block_devices.iter().find(|d| {
-                    crypttab_entry == Some(&d.name)
-                        || crypttab_entry == Some(&d.uuid)
-                        || d.name == entry.fs_spec
-                })
-            } else {
-                let fs_spec = entry.fs_spec.split('=').collect::<Vec<_>>();
-                if fs_spec.len() != 2 {
-                    log::warn!("Invalid fs_spec in fstab, skipping...");
-                    continue;
-                }
-                let fs_spec = fs_spec.last().unwrap();
-                block_devices.iter().find(|d| {
-                    d.uuid == *fs_spec
-                        || d.partuuid == Some(fs_spec.to_string())
-                        || d.label == Some(fs_spec.to_string())
-                        || d.partlabel == Some(fs_spec.to_string())
+                    d.matches_fstab_entry(crypttab_entry.unwrap_or(&entry.fs_spec))
+                        || d.matches_fstab_entry(&entry.fs_spec)
                 })
             };
             if device.is_none() {
@@ -309,11 +187,11 @@ fn main() {
             let actual_mount_point = Path::new(root_mount_point)
                 .join(entry.mountpoint.to_str().unwrap().trim_start_matches('/'));
             let actual_mount_point = actual_mount_point.to_str().unwrap();
-            if device.fs_type == "btrfs" {
+            if device.is_btrfs() {
                 let known_subvolumes = if discovered_btrfs_subvolumes.contains_key(&device.uuid) {
                     discovered_btrfs_subvolumes.get(&device.uuid).unwrap().clone()
                 } else {
-                    let subvolumes = list_subvolumes(device, args.show_btrfs_dot_snapshots);
+                    let subvolumes = btrfs::list_subvolumes(device, args.show_btrfs_dot_snapshots);
                     discovered_btrfs_subvolumes.insert(device.uuid.clone(), subvolumes.clone());
                     subvolumes
                 };
@@ -362,7 +240,7 @@ fn main() {
                     );
                     continue;
                 }
-                if mount_block_device(
+                if block_device::mount_block_device(
                     &selected_subvolume.device,
                     actual_mount_point,
                     true,
@@ -375,7 +253,7 @@ fn main() {
                 }
                 continue;
             }
-            if mount_block_device(device, actual_mount_point, true, None) {
+            if block_device::mount_block_device(device, actual_mount_point, true, None) {
                 mounted_partitions.push(device.get_id());
             }
         }
@@ -395,10 +273,16 @@ fn main() {
             continue;
         }
         let mut selected_device = selected_device.unwrap();
-        if selected_device.fs_type == "crypto_LUKS" {
+        if selected_device.is_crypto_luks() {
+            if !features.contains(features::Features::LUKS) {
+                utils::print_error_and_exit(
+                    "LUKS encrypted partition selected but LUKS support is disabled or missing \
+                     required binaries in PATH",
+                );
+            }
             luks::open_device(selected_device);
             opened_luks_devices.push(selected_device.clone());
-            block_devices = list_block_devices(Some(opened_luks_devices.to_owned()));
+            block_devices = block_device::list_block_devices(Some(opened_luks_devices.to_owned()));
             let user_selection = user_input::get_block_device(&mount_point, &block_devices, true);
             if user_selection.is_none() {
                 continue;
@@ -409,8 +293,14 @@ fn main() {
             log::warn!("Partition already mounted, skipping...");
             continue;
         }
-        if selected_device.fs_type == "btrfs" {
-            let selected_subvolume = get_btrfs_subvolume(
+        if selected_device.is_btrfs() {
+            if !features.contains(features::Features::BTRFS) {
+                utils::print_error_and_exit(
+                    "BTRFS partition selected but BTRFS support is disabled or missing required \
+                     binaries in PATH",
+                );
+            }
+            let selected_subvolume = btrfs::get_btrfs_subvolume(
                 selected_device,
                 &mut discovered_btrfs_subvolumes,
                 args.show_btrfs_dot_snapshots,
@@ -420,7 +310,7 @@ fn main() {
                 log::warn!("Partition already mounted, skipping...");
                 continue;
             }
-            if mount_block_device(
+            if block_device::mount_block_device(
                 &selected_subvolume.device,
                 actual_mount_point,
                 true,
@@ -432,8 +322,50 @@ fn main() {
                 mounted_partitions.push(selected_subvolume.get_id());
             }
             continue;
+        } else if selected_device.is_zfs_member() {
+            if !features.contains(features::Features::ZFS) {
+                utils::print_error_and_exit(
+                    "ZFS partition selected but ZFS support is disabled or missing required \
+                     binaries in PATH",
+                );
+            }
+            if imported_zfs_pools.iter().any(|d| d.get_id() == selected_device.get_id()) {
+                log::info!(
+                    "ZFS pool for the selected partition is already imported, proceeding to \
+                     dataset selection..."
+                );
+            } else {
+                zfs::import_zfs_pool(selected_device, root_mount_point);
+                imported_zfs_pools.push(selected_device.clone());
+            }
+            let mut zfs_datasets =
+                zfs::list_zfs_mountable_datasets(selected_device, &mut loaded_zfs_keys);
+            if zfs_datasets.is_empty() {
+                log::warn!(
+                    "No mountable ZFS datasets found in the selected partition, skipping..."
+                );
+                continue;
+            }
+            log::info!("Found {} mountable ZFS datasets", zfs_datasets.len());
+            let selection =
+                user_input::get_zfs_datasets(&selected_device.get_id(), &zfs_datasets, true);
+            for (i, dataset) in zfs_datasets.iter_mut().enumerate() {
+                if selection.contains(&i) {
+                    zfs::mount_zfs_dataset(dataset, actual_mount_point, true);
+                } else if dataset.is_mounted() {
+                    zfs::unmount_zfs_dataset(dataset);
+                }
+            }
+            zfs_datasets.iter().for_each(|zfs_dataset| {
+                if zfs_dataset.is_mounted() {
+                    mounted_partitions.push(zfs_dataset.get_id());
+                } else {
+                    mounted_partitions.retain(|d| d != &zfs_dataset.get_id());
+                }
+            });
+            continue;
         }
-        if mount_block_device(selected_device, actual_mount_point, true, None) {
+        if block_device::mount_block_device(selected_device, actual_mount_point, true, None) {
             mounted_partitions.push(selected_device.get_id());
         }
     }
@@ -449,8 +381,14 @@ fn main() {
         .join()
         .expect("Failed to chroot into root partition");
 
-    umount_block_device(root_mount_point, true);
+    block_device::umount_block_device(root_mount_point, true);
     for device in opened_luks_devices {
         luks::close_device(&device);
+    }
+    for key in loaded_zfs_keys {
+        zfs::unload_zfs_key(&key);
+    }
+    for device in imported_zfs_pools {
+        zfs::export_zfs_pool(&device);
     }
 }

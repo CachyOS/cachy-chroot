@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use subprocess::Exec;
 
-pub fn open_device(device: &block_device::BlockDevice) -> bool {
+pub fn open_device(device: &block_device::BlockDevice) {
     log::info!("Opening LUKS encrypted partition {}", device.name);
     let result = Exec::cmd("cryptsetup")
         .args(&["luksOpen", &device.name, &format!("luks-{}", &device.uuid)])
@@ -17,17 +17,15 @@ pub fn open_device(device: &block_device::BlockDevice) -> bool {
             device.name
         ));
     }
-    true
 }
 
-pub fn close_device(device: &block_device::BlockDevice) -> bool {
+pub fn close_device(device: &block_device::BlockDevice) {
     log::info!("Closing LUKS encrypted partition {}", device.name);
     let result =
         Exec::cmd("cryptsetup").args(&["luksClose", &format!("luks-{}", &device.uuid)]).join();
     if result.is_err() || !result.unwrap().success() {
         log::warn!("Failed to close LUKS encrypted partition {}", device.name);
     }
-    true
 }
 
 pub fn list_crypttab_entries(

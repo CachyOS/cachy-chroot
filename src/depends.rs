@@ -8,7 +8,7 @@ pub struct Depends {
     pub features: Features,
 }
 
-pub const DEPENDS: [Depends; 6] = [
+pub const DEPENDS: [Depends; 8] = [
     Depends {
         command: "lsblk",
         package: "util-linux",
@@ -50,5 +50,19 @@ pub const DEPENDS: [Depends; 6] = [
         required: false,
         optional_features_description: "LUKS Support",
         features: Features::LUKS,
+    },
+    Depends {
+        command: "zfs",
+        package: "zfs-utils",
+        required: false,
+        optional_features_description: "ZFS Support",
+        features: Features::ZFS,
+    },
+    Depends {
+        command: "zpool",
+        package: "zfs-utils",
+        required: false,
+        optional_features_description: "ZFS Support",
+        features: Features::ZFS,
     },
 ];
